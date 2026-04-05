@@ -44,6 +44,19 @@ func TestResolveOpenAITargetCustom(t *testing.T) {
 	}
 }
 
+func TestListenerURL(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+
+	url := listenerURL(ln, "127.0.0.1")
+	if !strings.HasPrefix(url, "http://127.0.0.1:") {
+		t.Fatalf("unexpected listener url: %s", url)
+	}
+}
+
 func TestAppStartProxy(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -85,11 +98,22 @@ func TestAppStartProxy(t *testing.T) {
 	if !status.Running {
 		t.Fatalf("expected running status")
 	}
-	if len(status.Routes) != 2 {
+	if len(status.Routes) != 4 {
 		t.Fatalf("unexpected routes: %#v", status.Routes)
 	}
 
-	resp, err := http.Post(status.Routes[1].URL, "application/json", strings.NewReader(`{
+	chatCompletionsURL := ""
+	for _, route := range status.Routes {
+		if route.Path == "/v1/chat/completions" {
+			chatCompletionsURL = route.URL
+			break
+		}
+	}
+	if chatCompletionsURL == "" {
+		t.Fatalf("missing chat completions route: %#v", status.Routes)
+	}
+
+	resp, err := http.Post(chatCompletionsURL, "application/json", strings.NewReader(`{
 		"model":"text-davinci-compat",
 		"messages":[{"role":"user","content":"say hi"}],
 		"max_tokens":16

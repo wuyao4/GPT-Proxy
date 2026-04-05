@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,8 +24,9 @@ type app struct {
 	timeout       time.Duration
 	logger        *logHub
 
-	mu    sync.Mutex
-	proxy *runningProxy
+	mu         sync.Mutex
+	proxy      *runningProxy
+	controlURL string
 }
 
 type runningProxy struct {
@@ -68,7 +70,7 @@ type routeDisplay struct {
 func newApp() (*app, error) {
 	controlListen := strings.TrimSpace(os.Getenv("CONTROL_ADDR"))
 	if controlListen == "" {
-		controlListen = "127.0.0.1:8080"
+		controlListen = "127.0.0.1:0"
 	}
 
 	proxyBindHost := strings.TrimSpace(os.Getenv("PROXY_BIND_HOST"))
@@ -91,7 +93,7 @@ func newApp() (*app, error) {
 	}
 
 	logger := newLogHub(500)
-	logger.Printf("control panel ready on http://%s", displayControlAddr(controlListen))
+	logger.Printf("control panel bootstrap on %s", controlListen)
 
 	return &app{
 		controlListen: controlListen,
@@ -103,11 +105,32 @@ func newApp() (*app, error) {
 }
 
 func (a *app) serve() error {
-	return http.ListenAndServe(a.controlListen, a.routes())
+	ln, err := net.Listen("tcp", a.controlListen)
+	if err != nil {
+		return err
+	}
+
+	controlURL := listenerURL(ln, a.displayHost)
+	a.mu.Lock()
+	a.controlURL = controlURL
+	a.mu.Unlock()
+	a.logger.Printf("control panel listening on %s", controlURL)
+
+	go func() {
+		if err := openBrowser(controlURL); err != nil {
+			a.logger.Printf("open browser failed: %v", err)
+		}
+	}()
+
+	server := &http.Server{Handler: a.routes()}
+	return server.Serve(ln)
 }
 
 func (a *app) controlAddr() string {
-	return "http://" + displayControlAddr(a.controlListen)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	return a.controlAddrLocked()
 }
 
 func (a *app) routes() http.Handler {
@@ -313,6 +336,7 @@ func (a *app) startProxy(ctx context.Context, host, key string, port int, hostMo
 
 	proxyCfg := config{
 		ListenAddr:   ln.Addr().String(),
+		ModelsURL:    target.ModelsURL,
 		ResponsesURL: target.ResponsesURL,
 		APIKey:       strings.TrimSpace(key),
 		Timeout:      a.timeout,
@@ -343,6 +367,8 @@ func (a *app) startProxy(ctx context.Context, host, key string, port int, hostMo
 	}()
 
 	a.logger.Printf("proxy started on %s", displayURL)
+	a.logger.Printf("OpenAI Models route: %s/v1/models", displayURL)
+	a.logger.Printf("OpenAI Responses route: %s/v1/responses", displayURL)
 	a.logger.Printf("Claude Messages route: %s/v1/messages", displayURL)
 	a.logger.Printf("OpenAI Chat Completions route: %s/v1/chat/completions", displayURL)
 	return nil
@@ -378,7 +404,7 @@ func (a *app) snapshotStatus() statusResponse {
 
 	resp := statusResponse{
 		Running:    a.proxy != nil,
-		ControlURL: a.controlAddr(),
+		ControlURL: a.controlAddrLocked(),
 		Routes:     []routeDisplay{},
 	}
 	if a.proxy == nil {
@@ -389,6 +415,8 @@ func (a *app) snapshotStatus() statusResponse {
 	resp.UpstreamResponses = a.proxy.responsesURL
 	resp.StartedAt = a.proxy.startedAt.Format(time.RFC3339)
 	resp.Routes = []routeDisplay{
+		{Name: "OpenAI Models", Path: "/v1/models", URL: a.proxy.displayURL + "/v1/models"},
+		{Name: "OpenAI Responses", Path: "/v1/responses", URL: a.proxy.displayURL + "/v1/responses"},
 		{Name: "Claude Messages", Path: "/v1/messages", URL: a.proxy.displayURL + "/v1/messages"},
 		{Name: "OpenAI Chat Completions", Path: "/v1/chat/completions", URL: a.proxy.displayURL + "/v1/chat/completions"},
 	}
@@ -495,4 +523,27 @@ func displayControlAddr(addr string) string {
 		return "127.0.0.1" + addr
 	}
 	return addr
+}
+
+func (a *app) controlAddrLocked() string {
+	if a.controlURL != "" {
+		return a.controlURL
+	}
+	return "http://" + displayControlAddr(a.controlListen)
+}
+
+func listenerURL(ln net.Listener, displayHost string) string {
+	port := 0
+	if tcpAddr, ok := ln.Addr().(*net.TCPAddr); ok {
+		port = tcpAddr.Port
+	}
+	return fmt.Sprintf("http://%s:%d", displayHost, port)
+}
+
+func openBrowser(targetURL string) error {
+	if targetURL == "" {
+		return errors.New("browser target url is empty")
+	}
+	cmd := exec.Command("rundll32", "url.dll,FileProtocolHandler", targetURL)
+	return cmd.Start()
 }

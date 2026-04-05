@@ -10,6 +10,7 @@ const defaultResponsesURL = "https://api.openai.com/v1/responses"
 
 type config struct {
 	ListenAddr   string
+	ModelsURL    string
 	ResponsesURL string
 	APIKey       string
 	Timeout      time.Duration
@@ -222,4 +223,9 @@ type streamState struct {
 type sseEvent struct {
 	Event string
 	Data  string
+}
+
+type openAIResponsesRequestMeta struct {
+	Model  string `json:"model"`
+	Stream bool   `json:"stream"`
 }

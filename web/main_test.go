@@ -263,6 +263,167 @@ func TestOpenAIChatCompletionsStreamingProxy(t *testing.T) {
 	}
 }
 
+func TestOpenAIResponsesPassthrough(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/responses" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if r.Header.Get("Authorization") != "Bearer passthrough-key" {
+			t.Fatalf("unexpected auth header: %q", r.Header.Get("Authorization"))
+		}
+		if r.Header.Get("OpenAI-Beta") != "assistants=v2" {
+			t.Fatalf("missing forwarded header: %q", r.Header.Get("OpenAI-Beta"))
+		}
+
+		var raw map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if raw["model"] != "gpt-5-codex" {
+			t.Fatalf("unexpected model: %#v", raw["model"])
+		}
+		if raw["reasoning"] == nil {
+			t.Fatalf("expected unknown field to survive passthrough: %#v", raw)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Upstream-Test", "responses")
+		writeJSON(w, http.StatusOK, map[string]any{
+			"id":     "resp_passthrough_1",
+			"object": "response",
+			"status": "completed",
+			"output": []map[string]any{{
+				"type": "message",
+				"role": "assistant",
+				"content": []map[string]any{{
+					"type": "output_text",
+					"text": "ok",
+				}},
+			}},
+		})
+	}))
+	defer upstream.Close()
+
+	srv := newServer(config{
+		ResponsesURL: upstream.URL + "/v1/responses",
+		APIKey:       "passthrough-key",
+		Timeout:      5 * time.Second,
+	})
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{
+		"model":"gpt-5-codex",
+		"input":[{"role":"user","content":"print(1)"}],
+		"reasoning":{"effort":"high"},
+		"stream":false
+	}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("OpenAI-Beta", "assistants=v2")
+
+	srv.routes().ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if recorder.Header().Get("X-Upstream-Test") != "responses" {
+		t.Fatalf("missing proxied response header: %#v", recorder.Header())
+	}
+
+	var resp map[string]any
+	if err := json.NewDecoder(recorder.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp["id"] != "resp_passthrough_1" {
+		t.Fatalf("unexpected response: %#v", resp)
+	}
+}
+
+func TestOpenAIResponsesStreamingPassthrough(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Accept") != "text/event-stream" {
+			t.Fatalf("unexpected accept header: %q", r.Header.Get("Accept"))
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(strings.Join([]string{
+			`event: response.created`,
+			`data: {"type":"response.created","id":"resp_stream_passthrough","model":"gpt-5-codex"}`,
+			``,
+			`event: response.output_text.delta`,
+			`data: {"type":"response.output_text.delta","delta":"hi"}`,
+			``,
+			`data: [DONE]`,
+			``,
+		}, "\n")))
+	}))
+	defer upstream.Close()
+
+	srv := newServer(config{
+		ResponsesURL: upstream.URL + "/v1/responses",
+		Timeout:      5 * time.Second,
+	})
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{
+		"model":"gpt-5-codex",
+		"input":"hello",
+		"stream":true
+	}`))
+	request.Header.Set("Content-Type", "application/json")
+
+	srv.routes().ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if got := recorder.Header().Get("Content-Type"); !strings.HasPrefix(got, "text/event-stream") {
+		t.Fatalf("unexpected content type: %q", got)
+	}
+
+	body := recorder.Body.String()
+	if !strings.Contains(body, `event: response.created`) || !strings.Contains(body, `data: [DONE]`) {
+		t.Fatalf("unexpected stream body: %s", body)
+	}
+}
+
+func TestOpenAIModelsPassthrough(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if r.Header.Get("Authorization") != "Bearer models-key" {
+			t.Fatalf("unexpected auth header: %q", r.Header.Get("Authorization"))
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"object": "list",
+			"data": []map[string]any{{
+				"id":     "gpt-5-codex",
+				"object": "model",
+			}},
+		})
+	}))
+	defer upstream.Close()
+
+	srv := newServer(config{
+		ModelsURL: upstream.URL + "/v1/models",
+		APIKey:    "models-key",
+		Timeout:   5 * time.Second,
+	})
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+
+	srv.routes().ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", recorder.Code, recorder.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.NewDecoder(recorder.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode models response: %v", err)
+	}
+	if resp["object"] != "list" {
+		t.Fatalf("unexpected response: %#v", resp)
+	}
+}
+
 func readDataEvents(t *testing.T, body string) []string {
 	t.Helper()
 
