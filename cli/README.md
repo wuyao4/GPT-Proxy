@@ -1,4 +1,4 @@
-# CLI Placeholder
+# Go Proxy CLI
 
 这个目录预留给后续的命令行版本。
 
