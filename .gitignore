@@ -1,0 +1,40 @@
+# Go build outputs
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+*.coverprofile
+coverage.out
+
+# Local build/cache directories
+.gocache/
+bin/
+dist/
+build/
+release/
+
+# IDE/editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Logs
+*.log
+
+# Desktop app packaging artifacts
+desktop/bin/
+desktop/build/
+desktop/dist/
+
+# CLI temp outputs
+cli/bin/
