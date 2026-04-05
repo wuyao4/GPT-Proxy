@@ -1,4 +1,4 @@
-package main
+package proxyshared
 
 import (
 	"bufio"
@@ -10,7 +10,7 @@ import (
 	"strings"
 )
 
-func (s *server) streamClaudeMessages(w http.ResponseWriter, incoming *http.Request, payload openAIResponsesRequest, fallbackModel string, stopSequences []string) error {
+func (s *Server) streamClaudeMessages(w http.ResponseWriter, incoming *http.Request, payload openAIResponsesRequest, fallbackModel string, stopSequences []string) error {
 	upstream, statusCode, err := s.forwardResponsesStream(incoming, payload)
 	if err != nil {
 		writeError(w, statusCode, err.Error())
@@ -208,7 +208,7 @@ func (s *server) streamClaudeMessages(w http.ResponseWriter, incoming *http.Requ
 	return err
 }
 
-func (s *server) streamOpenAIChatCompletions(w http.ResponseWriter, incoming *http.Request, payload openAIResponsesRequest, fallbackModel string, stopSequences []string) error {
+func (s *Server) streamOpenAIChatCompletions(w http.ResponseWriter, incoming *http.Request, payload openAIResponsesRequest, fallbackModel string, stopSequences []string) error {
 	upstream, statusCode, err := s.forwardResponsesStream(incoming, payload)
 	if err != nil {
 		writeError(w, statusCode, err.Error())

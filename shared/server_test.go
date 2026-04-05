@@ -1,4 +1,4 @@
-package main
+package proxyshared
 
 import (
 	"bufio"
@@ -54,7 +54,7 @@ func TestClaudeMessagesProxy(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	srv := newServer(config{ResponsesURL: upstream.URL, Timeout: 5 * time.Second})
+	srv := NewServer(Config{ResponsesURL: upstream.URL, Timeout: 5 * time.Second})
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{
 		"model":"claude-compat",
@@ -65,7 +65,7 @@ func TestClaudeMessagesProxy(t *testing.T) {
 	}`))
 	request.Header.Set("Content-Type", "application/json")
 
-	srv.routes().ServeHTTP(recorder, request)
+	srv.Routes().ServeHTTP(recorder, request)
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("unexpected status: %d body=%s", recorder.Code, recorder.Body.String())
@@ -122,7 +122,7 @@ func TestOpenAIChatCompletionsProxy(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	srv := newServer(config{ResponsesURL: upstream.URL, Timeout: 5 * time.Second})
+	srv := NewServer(Config{ResponsesURL: upstream.URL, Timeout: 5 * time.Second})
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{
 		"model":"text-davinci-compat",
@@ -132,7 +132,7 @@ func TestOpenAIChatCompletionsProxy(t *testing.T) {
 	}`))
 	request.Header.Set("Content-Type", "application/json")
 
-	srv.routes().ServeHTTP(recorder, request)
+	srv.Routes().ServeHTTP(recorder, request)
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("unexpected status: %d body=%s", recorder.Code, recorder.Body.String())
@@ -174,7 +174,7 @@ func TestClaudeMessagesStreamingProxy(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	srv := newServer(config{ResponsesURL: upstream.URL, Timeout: 5 * time.Second})
+	srv := NewServer(Config{ResponsesURL: upstream.URL, Timeout: 5 * time.Second})
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{
 		"model":"claude-compat",
@@ -184,7 +184,7 @@ func TestClaudeMessagesStreamingProxy(t *testing.T) {
 	}`))
 	request.Header.Set("Content-Type", "application/json")
 
-	srv.routes().ServeHTTP(recorder, request)
+	srv.Routes().ServeHTTP(recorder, request)
 
 	body := recorder.Body.String()
 	if !strings.Contains(body, "event: message_start") {
@@ -218,7 +218,7 @@ func TestOpenAIChatCompletionsStreamingProxy(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	srv := newServer(config{ResponsesURL: upstream.URL, Timeout: 5 * time.Second})
+	srv := NewServer(Config{ResponsesURL: upstream.URL, Timeout: 5 * time.Second})
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{
 		"model":"text-davinci-compat",
@@ -228,7 +228,7 @@ func TestOpenAIChatCompletionsStreamingProxy(t *testing.T) {
 	}`))
 	request.Header.Set("Content-Type", "application/json")
 
-	srv.routes().ServeHTTP(recorder, request)
+	srv.Routes().ServeHTTP(recorder, request)
 
 	events := readDataEvents(t, recorder.Body.String())
 	if len(events) < 4 {
@@ -304,7 +304,7 @@ func TestOpenAIResponsesPassthrough(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	srv := newServer(config{
+	srv := NewServer(Config{
 		ResponsesURL: upstream.URL + "/v1/responses",
 		APIKey:       "passthrough-key",
 		Timeout:      5 * time.Second,
@@ -319,7 +319,7 @@ func TestOpenAIResponsesPassthrough(t *testing.T) {
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("OpenAI-Beta", "assistants=v2")
 
-	srv.routes().ServeHTTP(recorder, request)
+	srv.Routes().ServeHTTP(recorder, request)
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("unexpected status: %d body=%s", recorder.Code, recorder.Body.String())
@@ -356,7 +356,7 @@ func TestOpenAIResponsesStreamingPassthrough(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	srv := newServer(config{
+	srv := NewServer(Config{
 		ResponsesURL: upstream.URL + "/v1/responses",
 		Timeout:      5 * time.Second,
 	})
@@ -368,7 +368,7 @@ func TestOpenAIResponsesStreamingPassthrough(t *testing.T) {
 	}`))
 	request.Header.Set("Content-Type", "application/json")
 
-	srv.routes().ServeHTTP(recorder, request)
+	srv.Routes().ServeHTTP(recorder, request)
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("unexpected status: %d body=%s", recorder.Code, recorder.Body.String())
@@ -401,7 +401,7 @@ func TestOpenAIModelsPassthrough(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	srv := newServer(config{
+	srv := NewServer(Config{
 		ModelsURL: upstream.URL + "/v1/models",
 		APIKey:    "models-key",
 		Timeout:   5 * time.Second,
@@ -409,7 +409,7 @@ func TestOpenAIModelsPassthrough(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
 
-	srv.routes().ServeHTTP(recorder, request)
+	srv.Routes().ServeHTTP(recorder, request)
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("unexpected status: %d body=%s", recorder.Code, recorder.Body.String())

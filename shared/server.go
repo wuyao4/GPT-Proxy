@@ -1,4 +1,4 @@
-package main
+package proxyshared
 
 import (
 	"bytes"
@@ -14,12 +14,12 @@ import (
 	"time"
 )
 
-func newServer(cfg config) *server {
+func NewServer(cfg Config) *Server {
 	return newServerWithLogger(cfg, nil)
 }
 
-func newServerWithLogger(cfg config, logger *logHub) *server {
-	return &server{
+func newServerWithLogger(cfg Config, logger *LogHub) *Server {
+	return &Server{
 		cfg: cfg,
 		client: &http.Client{
 			Timeout: cfg.Timeout,
@@ -28,7 +28,7 @@ func newServerWithLogger(cfg config, logger *logHub) *server {
 	}
 }
 
-func (s *server) routes() http.Handler {
+func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/models", s.handleOpenAIModels)
 	mux.HandleFunc("/v1/models/", s.handleOpenAIModels)
@@ -41,12 +41,12 @@ func (s *server) routes() http.Handler {
 	return mux
 }
 
-func loadConfig() (config, error) {
+func LoadConfig() (Config, error) {
 	timeout := 60 * time.Second
 	if raw := strings.TrimSpace(os.Getenv("HTTP_TIMEOUT_SECONDS")); raw != "" {
 		seconds, err := strconv.Atoi(raw)
 		if err != nil {
-			return config{}, fmt.Errorf("invalid HTTP_TIMEOUT_SECONDS: %w", err)
+			return Config{}, fmt.Errorf("invalid HTTP_TIMEOUT_SECONDS: %w", err)
 		}
 		timeout = time.Duration(seconds) * time.Second
 	}
@@ -65,7 +65,7 @@ func loadConfig() (config, error) {
 		listenAddr = ":8080"
 	}
 
-	return config{
+	return Config{
 		ListenAddr:   listenAddr,
 		ModelsURL:    modelsURL,
 		ResponsesURL: responsesURL,
@@ -74,7 +74,7 @@ func loadConfig() (config, error) {
 	}, nil
 }
 
-func (s *server) handleOpenAIModels(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleOpenAIModels(w http.ResponseWriter, r *http.Request) {
 	s.logf("proxy request %s %s", r.Method, r.URL.Path)
 	if r.Method != http.MethodGet {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -106,7 +106,7 @@ func (s *server) handleOpenAIModels(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *server) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) {
 	s.logf("proxy request %s %s", r.Method, r.URL.Path)
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -150,7 +150,7 @@ func (s *server) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *server) handleClaudeMessages(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleClaudeMessages(w http.ResponseWriter, r *http.Request) {
 	s.logf("proxy request %s %s", r.Method, r.URL.Path)
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -217,7 +217,7 @@ func (s *server) handleClaudeMessages(w http.ResponseWriter, r *http.Request) {
 	s.logf("completed Claude Messages request model=%s", req.Model)
 }
 
-func (s *server) handleOpenAIChatCompletions(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleOpenAIChatCompletions(w http.ResponseWriter, r *http.Request) {
 	s.logf("proxy request %s %s", r.Method, r.URL.Path)
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -287,7 +287,7 @@ func (s *server) handleOpenAIChatCompletions(w http.ResponseWriter, r *http.Requ
 	s.logf("completed OpenAI Chat Completions request model=%s", req.Model)
 }
 
-func (s *server) forwardResponses(incoming *http.Request, payload openAIResponsesRequest) (openAIResponsesResponse, int, error) {
+func (s *Server) forwardResponses(incoming *http.Request, payload openAIResponsesRequest) (openAIResponsesResponse, int, error) {
 	resp, statusCode, err := s.doResponsesRequest(incoming, payload)
 	if err != nil {
 		return openAIResponsesResponse{}, statusCode, err
@@ -301,11 +301,11 @@ func (s *server) forwardResponses(incoming *http.Request, payload openAIResponse
 	return decoded, http.StatusOK, nil
 }
 
-func (s *server) forwardResponsesStream(incoming *http.Request, payload openAIResponsesRequest) (*http.Response, int, error) {
+func (s *Server) forwardResponsesStream(incoming *http.Request, payload openAIResponsesRequest) (*http.Response, int, error) {
 	return s.doResponsesRequest(incoming, payload)
 }
 
-func (s *server) doResponsesRequest(incoming *http.Request, payload openAIResponsesRequest) (*http.Response, int, error) {
+func (s *Server) doResponsesRequest(incoming *http.Request, payload openAIResponsesRequest) (*http.Response, int, error) {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, http.StatusInternalServerError, fmt.Errorf("marshal upstream request: %w", err)
@@ -350,7 +350,7 @@ func (s *server) doResponsesRequest(incoming *http.Request, payload openAIRespon
 	return resp, http.StatusOK, nil
 }
 
-func (s *server) forwardRawRequest(incoming *http.Request, method, targetURL string, body []byte, defaultAccept string) (*http.Response, error) {
+func (s *Server) forwardRawRequest(incoming *http.Request, method, targetURL string, body []byte, defaultAccept string) (*http.Response, error) {
 	var reader io.Reader
 	if body != nil {
 		reader = bytes.NewReader(body)
@@ -503,7 +503,7 @@ func claudeContentToResponsesString(raw json.RawMessage) (string, error) {
 	return "", errors.New("content must be a string or an array of text blocks")
 }
 
-func (s *server) logf(format string, args ...any) {
+func (s *Server) logf(format string, args ...any) {
 	if s.logger == nil {
 		return
 	}

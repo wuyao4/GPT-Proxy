@@ -1,78 +1,68 @@
-# GPT Proxy Web
+# Gpt Proxy Web
 
-GPT Proxy Web 是当前项目的网页控制台版本，用于：
+Browser-based control panel for testing the upstream endpoint, starting and stopping the proxy, and reading live logs.
 
-- 将 Claude Messages 请求转换为 OpenAI Responses 请求
-- 将 OpenAI Chat Completions 请求转换为 OpenAI Responses 请求
-- 再将结果转换回对应协议格式返回
+## Features
 
-## 当前接口
+- Local browser control panel
+- Upstream `responses` compatibility test
+- Start the local proxy and show the proxy address
+- Stream runtime logs in real time
+- Automatically open the browser after startup
 
+Current proxy routes:
+
+- `GET /v1/models`
+- `POST /v1/responses`
 - `POST /v1/messages`
 - `POST /v1/chat/completions`
 
-## 功能
+## Run
 
-- 支持 Claude Messages 协议转换
-- 支持 OpenAI Chat Completions 协议转换
-- 支持流式和非流式响应
-- 支持网页控制台配置上游 Host、Key、测试模型和代理端口
-- 支持自动打开浏览器进入控制台
-- 保留控制台窗口，关闭窗口即可结束进程
-- 支持查看代理运行日志
-
-## 启动
-
-在 `web/` 目录执行：
+From `web/`:
 
 ```powershell
 go run .
 ```
 
-当前默认行为：
+Default behavior:
 
-- 控制台监听 `127.0.0.1:0`
-- 启动时自动分配随机控制台端口
-- 启动后自动打开默认浏览器
+- The control panel listens on a random local port
+- The browser opens automatically after startup
+- You can test the upstream connection and start the proxy from the page
 
-## 打包为控制台 EXE
+## Environment Variables
 
-在 `web/` 目录执行：
+- `CONTROL_ADDR`
+  - Control panel listen address
+  - Default: `127.0.0.1:0`
+- `PROXY_BIND_HOST`
+  - Proxy listen host
+  - Default: `127.0.0.1`
+- `DISPLAY_HOST`
+  - Host name shown to the user for proxy URLs
+  - Defaults to `PROXY_BIND_HOST`
+- `HTTP_TIMEOUT_SECONDS`
+  - Upstream request timeout in seconds
+  - Default: `60`
 
-```powershell
-.\build-web.ps1
-```
+## Build
 
-或者直接执行：
+From `web/`:
 
 ```powershell
 go build -o gpt-proxy-web.exe .
 ```
 
-说明：
+## Test
 
-- 运行后会自动打开默认浏览器
-- 同时保留黑色控制台窗口
-- 关闭控制台窗口即可结束程序
-
-## 控制台说明
-
-控制台页面支持：
-
-- `Host Mode`
-  - 默认模式：自动补成标准 `/v1/responses`
-  - 自定义模式：将填写地址直接作为最终 Responses 地址
-- `OpenAI Host`
-- `API Key`
-- `Test Model`
-- `Proxy Port`
-
-点击“检测会话”时，会向上游发送一条最小会话请求验证是否真实可用。
-
-## 测试
-
-在 `web/` 目录执行：
+From `web/`:
 
 ```powershell
 go test ./...
 ```
+
+## Notes
+
+- The Web build and Desktop build share the same embedded control UI from `../shared/controlui/`.
+- Shared proxy behavior lives in `../shared/`.

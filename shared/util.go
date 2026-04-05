@@ -1,4 +1,4 @@
-package main
+package proxyshared
 
 import (
 	"bytes"
@@ -11,14 +11,6 @@ import (
 	"strings"
 	"time"
 )
-
-type stopSequenceFilter struct {
-	stops        []string
-	maxStopRunes int
-	pending      string
-	matched      string
-	done         bool
-}
 
 func promptToInput(raw json.RawMessage) (any, error) {
 	if len(bytes.TrimSpace(raw)) == 0 {

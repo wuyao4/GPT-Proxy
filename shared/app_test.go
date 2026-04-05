@@ -1,4 +1,4 @@
-package main
+package proxyshared
 
 import (
 	"context"
@@ -12,7 +12,7 @@ import (
 )
 
 func TestNormalizeOpenAIHost(t *testing.T) {
-	baseURL, modelsURL, responsesURL, err := normalizeOpenAIHost("https://example.com/custom/v1/responses")
+	baseURL, modelsURL, responsesURL, err := NormalizeOpenAIHost("https://example.com/custom/v1/responses")
 	if err != nil {
 		t.Fatalf("normalize host: %v", err)
 	}
@@ -29,7 +29,7 @@ func TestNormalizeOpenAIHost(t *testing.T) {
 }
 
 func TestResolveOpenAITargetCustom(t *testing.T) {
-	target, err := resolveOpenAITarget("https://relay.example.com/openai/responses", "custom")
+	target, err := ResolveOpenAITarget("https://relay.example.com/openai/responses", "custom")
 	if err != nil {
 		t.Fatalf("resolve custom target: %v", err)
 	}
@@ -41,6 +41,19 @@ func TestResolveOpenAITargetCustom(t *testing.T) {
 	}
 	if target.ResponsesURL != "https://relay.example.com/openai/responses" {
 		t.Fatalf("unexpected responses url: %s", target.ResponsesURL)
+	}
+}
+
+func TestListenerURL(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+
+	url := listenerURL(ln, "127.0.0.1")
+	if !strings.HasPrefix(url, "http://127.0.0.1:") {
+		t.Fatalf("unexpected listener url: %s", url)
 	}
 }
 
@@ -68,7 +81,7 @@ func TestAppStartProxy(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	app := &app{
+	app := &App{
 		controlListen: "127.0.0.1:8080",
 		displayHost:   "127.0.0.1",
 		proxyBindHost: "127.0.0.1",
@@ -76,20 +89,31 @@ func TestAppStartProxy(t *testing.T) {
 		logger:        newLogHub(100),
 	}
 
-	if err := app.startProxy(context.Background(), upstream.URL, "", 0, "default"); err != nil {
+	if err := app.StartProxy(context.Background(), upstream.URL, "", 0, "default"); err != nil {
 		t.Fatalf("start proxy: %v", err)
 	}
-	defer func() { _ = app.stopProxy() }()
+	defer func() { _ = app.StopProxy() }()
 
-	status := app.snapshotStatus()
+	status := app.SnapshotStatus()
 	if !status.Running {
 		t.Fatalf("expected running status")
 	}
-	if len(status.Routes) != 2 {
+	if len(status.Routes) != 4 {
 		t.Fatalf("unexpected routes: %#v", status.Routes)
 	}
 
-	resp, err := http.Post(status.Routes[1].URL, "application/json", strings.NewReader(`{
+	chatCompletionsURL := ""
+	for _, route := range status.Routes {
+		if route.Path == "/v1/chat/completions" {
+			chatCompletionsURL = route.URL
+			break
+		}
+	}
+	if chatCompletionsURL == "" {
+		t.Fatalf("missing chat completions route: %#v", status.Routes)
+	}
+
+	resp, err := http.Post(chatCompletionsURL, "application/json", strings.NewReader(`{
 		"model":"text-davinci-compat",
 		"messages":[{"role":"user","content":"say hi"}],
 		"max_tokens":16
@@ -132,7 +156,7 @@ func TestAppStartProxyWithFixedPort(t *testing.T) {
 	fixedPort := portListener.Addr().(*net.TCPAddr).Port
 	_ = portListener.Close()
 
-	app := &app{
+	app := &App{
 		controlListen: "127.0.0.1:8080",
 		displayHost:   "127.0.0.1",
 		proxyBindHost: "127.0.0.1",
@@ -140,12 +164,12 @@ func TestAppStartProxyWithFixedPort(t *testing.T) {
 		logger:        newLogHub(100),
 	}
 
-	if err := app.startProxy(context.Background(), upstream.URL, "", fixedPort, "default"); err != nil {
+	if err := app.StartProxy(context.Background(), upstream.URL, "", fixedPort, "default"); err != nil {
 		t.Fatalf("start proxy with fixed port: %v", err)
 	}
-	defer func() { _ = app.stopProxy() }()
+	defer func() { _ = app.StopProxy() }()
 
-	status := app.snapshotStatus()
+	status := app.SnapshotStatus()
 	if status.ProxyPort != fixedPort {
 		t.Fatalf("expected fixed port %d, got %d", fixedPort, status.ProxyPort)
 	}
@@ -182,8 +206,49 @@ func TestCheckResponsesCompatibility(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	app := &app{timeout: 5 * time.Second}
-	if err := app.checkResponsesCompatibility(context.Background(), upstream.URL+"/v1/responses", "", "gpt-5.4"); err != nil {
+	app := &App{timeout: 5 * time.Second}
+	if err := app.CheckResponsesCompatibility(context.Background(), upstream.URL+"/v1/responses", "", "gpt-5.4"); err != nil {
 		t.Fatalf("responses compatibility: %v", err)
+	}
+}
+
+func TestAppControlServerLifecycle(t *testing.T) {
+	app, err := NewApp(AppOptions{
+		DefaultControlListen: "127.0.0.1:0",
+	})
+	if err != nil {
+		t.Fatalf("new app: %v", err)
+	}
+
+	indexCalls := 0
+	handler := func(w http.ResponseWriter, r *http.Request) {
+		indexCalls++
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}
+
+	if err := app.StartControlServer(handler, false); err != nil {
+		t.Fatalf("start control server: %v", err)
+	}
+
+	if err := app.StartControlServer(handler, false); err == nil {
+		t.Fatalf("expected duplicate control server start to fail")
+	}
+
+	resp, err := http.Get(app.ControlAddr() + "/")
+	if err != nil {
+		t.Fatalf("get control index: %v", err)
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected control index status: %d", resp.StatusCode)
+	}
+	if indexCalls != 1 {
+		t.Fatalf("unexpected index call count: %d", indexCalls)
+	}
+
+	if err := app.StopControlServer(); err != nil {
+		t.Fatalf("stop control server: %v", err)
 	}
 }

@@ -1,4 +1,4 @@
-package main
+package proxyshared
 
 import (
 	"fmt"
@@ -6,22 +6,22 @@ import (
 	"time"
 )
 
-type logHub struct {
+type LogHub struct {
 	mu        sync.Mutex
 	lines     []string
 	subs      map[chan string]struct{}
 	maxBuffer int
 }
 
-func newLogHub(maxBuffer int) *logHub {
-	return &logHub{
+func newLogHub(maxBuffer int) *LogHub {
+	return &LogHub{
 		lines:     make([]string, 0, maxBuffer),
 		subs:      make(map[chan string]struct{}),
 		maxBuffer: maxBuffer,
 	}
 }
 
-func (h *logHub) Printf(format string, args ...any) {
+func (h *LogHub) Printf(format string, args ...any) {
 	line := fmt.Sprintf("%s  %s", time.Now().Format("15:04:05"), fmt.Sprintf(format, args...))
 
 	h.mu.Lock()
@@ -41,7 +41,7 @@ func (h *logHub) Printf(format string, args ...any) {
 	h.mu.Unlock()
 }
 
-func (h *logHub) Snapshot() []string {
+func (h *LogHub) Snapshot() []string {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
@@ -50,7 +50,7 @@ func (h *logHub) Snapshot() []string {
 	return out
 }
 
-func (h *logHub) Subscribe() (<-chan string, func()) {
+func (h *LogHub) Subscribe() (<-chan string, func()) {
 	ch := make(chan string, 64)
 
 	h.mu.Lock()
@@ -59,8 +59,10 @@ func (h *logHub) Subscribe() (<-chan string, func()) {
 
 	cancel := func() {
 		h.mu.Lock()
-		delete(h.subs, ch)
-		close(ch)
+		if _, ok := h.subs[ch]; ok {
+			delete(h.subs, ch)
+			close(ch)
+		}
 		h.mu.Unlock()
 	}
 

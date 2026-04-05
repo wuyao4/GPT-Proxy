@@ -1,4 +1,4 @@
-package main
+package proxyshared
 
 import (
 	"encoding/json"
@@ -8,17 +8,18 @@ import (
 
 const defaultResponsesURL = "https://api.openai.com/v1/responses"
 
-type config struct {
+type Config struct {
 	ListenAddr   string
+	ModelsURL    string
 	ResponsesURL string
 	APIKey       string
 	Timeout      time.Duration
 }
 
-type server struct {
-	cfg    config
+type Server struct {
+	cfg    Config
 	client *http.Client
-	logger *logHub
+	logger *LogHub
 }
 
 type claudeMessagesRequest struct {
@@ -222,4 +223,17 @@ type streamState struct {
 type sseEvent struct {
 	Event string
 	Data  string
+}
+
+type openAIResponsesRequestMeta struct {
+	Model  string `json:"model"`
+	Stream bool   `json:"stream"`
+}
+
+type stopSequenceFilter struct {
+	stops        []string
+	maxStopRunes int
+	pending      string
+	matched      string
+	done         bool
 }

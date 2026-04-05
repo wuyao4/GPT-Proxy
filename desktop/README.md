@@ -1,12 +1,54 @@
-# Go Proxy Desktop
+# Gpt Proxy Desktop
 
-这个目录当前是从 `web/` 下的 Go Proxy Web 复制出来的桌面版基线代码。
+Windows desktop build powered by WebView2. It reuses the same control surface as the Web build instead of maintaining a separate native form UI.
 
-当前状态：
-- 代码与根目录的 Web 版本基本一致
-- 后续会在这里改造成真正的桌面窗口应用
-- 目前不要把这里当成最终桌面实现
+## Features
 
-建议：
-- Web 版本继续在 `web/` 目录开发和验证
-- Desktop 版本后续再引入桌面框架
+- Reuses the Web control surface inside a desktop window
+- Test the upstream endpoint, start and stop the proxy, and read logs in one place
+- Shows the proxy base URL and available routes after startup
+- Does not open an external browser window
+- Stops the local control server and proxy when the window closes
+
+Current proxy routes:
+
+- `GET /v1/models`
+- `POST /v1/responses`
+- `POST /v1/messages`
+- `POST /v1/chat/completions`
+
+## Run
+
+From `desktop/`:
+
+```powershell
+go run .
+```
+
+## Requirements
+
+- Windows 10 or Windows 11
+- Microsoft Edge WebView2 Runtime
+
+Most modern Windows installs already include WebView2 Runtime. If the desktop app cannot create its window, install or repair that runtime first.
+
+## Build
+
+From `desktop/`:
+
+```powershell
+go build -buildvcs=false -o gpt-proxy-desktop.exe .
+```
+
+## Test
+
+From `desktop/`:
+
+```powershell
+go test ./...
+```
+
+## Notes
+
+- The Desktop build and Web build share the same embedded control UI from `../shared/controlui/`.
+- Shared proxy behavior lives in `../shared/`.

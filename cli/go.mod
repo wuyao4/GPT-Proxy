@@ -1,4 +1,4 @@
-module gptproxy/web
+module gptproxy/cli
 
 go 1.21
 
