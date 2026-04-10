@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(go build:*)",
+      "Bash(./desktop.exe:*)",
+      "Bash(curl -s http://127.0.0.1:8080/api/status)",
+      "Bash(sed -i 's/http\\\\.MethodGET/http.MethodGet/g' server.go)",
+      "Bash(sed -i 's/http\\\\.MethodPOST/http.MethodPost/g' server.go)",
+      "Bash(sed -i 's/http\\\\.MethodDELETE/http.MethodDelete/g' server.go)",
+      "Bash(git restore:*)",
+      "Bash(bash:*)",
+      "Bash(chmod +x:*)",
+      "Bash(\"D:\\\\project\\\\Go\\\\GPT-Proxy\\\\check_forwarding_logic.sh\")",
+      "Bash(grep -E \"^d|main.go|server.go|\\\\.go$\")"
+    ]
+  }
+}

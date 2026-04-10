@@ -21,6 +21,7 @@ type runOptions struct {
 	port        int
 	listenHost  string
 	displayHost string
+	protocol    string
 }
 
 func parseRunOptions(args []string) (runOptions, error) {
@@ -33,6 +34,7 @@ func parseRunOptions(args []string) (runOptions, error) {
 	fs.StringVar(&opts.listenHost, "listen-host", "", "proxy listen host")
 	fs.StringVar(&opts.listenHost, "host", "", "proxy listen host")
 	fs.StringVar(&opts.displayHost, "display-host", "", "proxy display host")
+	fs.StringVar(&opts.protocol, "protocol", "", "upstream protocol: responses or chat_completions (default: responses)")
 	if err := fs.Parse(args); err != nil {
 		return runOptions{}, err
 	}
@@ -40,6 +42,7 @@ func parseRunOptions(args []string) (runOptions, error) {
 	opts.upstream = strings.TrimSpace(opts.upstream)
 	opts.listenHost = strings.TrimSpace(opts.listenHost)
 	opts.displayHost = strings.TrimSpace(opts.displayHost)
+	opts.protocol = strings.TrimSpace(opts.protocol)
 	return opts, nil
 }
 
@@ -75,6 +78,9 @@ func runCLI(args []string, stdin io.Reader, stdout io.Writer) error {
 		return err
 	}
 
+	// 标准化协议参数
+	protocol := normalizeProtocol(opts.protocol)
+
 	app, err := proxyshared.NewApp(proxyshared.AppOptions{
 		DefaultControlListen: "127.0.0.1:0",
 		DefaultProxyBindHost: opts.listenHost,
@@ -87,7 +93,7 @@ func runCLI(args []string, stdin io.Reader, stdout io.Writer) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := app.StartProxy(ctx, host, "", opts.port, hostMode, "responses"); err != nil {
+	if err := app.StartProxy(ctx, host, "", opts.port, hostMode, protocol); err != nil {
 		return err
 	}
 	stopped := false
@@ -137,6 +143,9 @@ func applyOptionDefaults(opts runOptions) runOptions {
 	if opts.displayHost == "" {
 		opts.displayHost = defaultDisplayHost(opts.listenHost)
 	}
+	if opts.protocol == "" {
+		opts.protocol = "responses"
+	}
 	return opts
 }
 
@@ -165,6 +174,12 @@ func promptInteractiveOptions(stdin io.Reader, stdout io.Writer, opts runOptions
 	if err != nil {
 		return runOptions{}, false, err
 	}
+
+	protocolChoice, err := promptWithDefault(reader, stdout, "Upstream protocol (responses/chat_completions)", opts.protocol)
+	if err != nil {
+		return runOptions{}, false, err
+	}
+
 	listenHost, err := promptWithDefault(reader, stdout, "Listen host", opts.listenHost)
 	if err != nil {
 		return runOptions{}, false, err
@@ -175,6 +190,7 @@ func promptInteractiveOptions(stdin io.Reader, stdout io.Writer, opts runOptions
 	}
 
 	opts.upstream = upstream
+	opts.protocol = normalizeProtocol(protocolChoice)
 	opts.listenHost = strings.TrimSpace(listenHost)
 	opts.displayHost = defaultDisplayHost(opts.listenHost)
 	opts.port = 0
@@ -246,5 +262,17 @@ func defaultDisplayHost(listenHost string) string {
 		return "127.0.0.1"
 	default:
 		return strings.TrimSpace(listenHost)
+	}
+}
+
+func normalizeProtocol(raw string) string {
+	normalized := strings.ToLower(strings.TrimSpace(raw))
+	switch normalized {
+	case "chat_completions", "chatcompletions", "chat":
+		return "chat_completions"
+	case "responses", "response", "":
+		return "responses"
+	default:
+		return "responses"
 	}
 }

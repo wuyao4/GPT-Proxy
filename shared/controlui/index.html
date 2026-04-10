@@ -84,6 +84,39 @@
       flex: 0 0 auto;
     }
 
+    /* 新增：顶部右侧工具栏 */
+    .topbar-tools {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 12px;
+    }
+
+    /* 新增：语言切换按钮 */
+    .lang-toggle {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      border-radius: 12px;
+      background: rgba(141, 226, 233, 0.08);
+      border: 1px solid rgba(141, 226, 233, 0.16);
+      cursor: pointer;
+      transition: all 0.18s ease;
+      font: 12px var(--mono);
+      color: var(--accent);
+      letter-spacing: 0.08em;
+    }
+
+    .lang-toggle:hover {
+      background: rgba(141, 226, 233, 0.14);
+      transform: translateY(-1px);
+    }
+
+    .lang-toggle-icon {
+      font-size: 16px;
+    }
+
     .eyebrow {
       display: inline-flex;
       align-items: center;
@@ -187,6 +220,37 @@
       border-color: var(--line-strong);
       box-shadow: 0 0 0 4px rgba(141, 226, 233, 0.08);
       transform: translateY(-1px);
+    }
+
+    /* 新增：复选框样式 */
+    .checkbox-group {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 11px 13px;
+      border-radius: 12px;
+      background: rgba(6, 17, 26, 0.94);
+      border: 1px solid rgba(141, 226, 233, 0.16);
+      cursor: pointer;
+      transition: all 0.18s ease;
+    }
+
+    .checkbox-group:hover {
+      border-color: var(--line-strong);
+      background: rgba(6, 17, 26, 1);
+    }
+
+    .checkbox-group input[type="checkbox"] {
+      width: auto;
+      margin: 0;
+      cursor: pointer;
+      accent-color: var(--accent);
+    }
+
+    .checkbox-group label {
+      margin: 0;
+      cursor: pointer;
+      flex: 1;
     }
 
     .state {
@@ -364,29 +428,36 @@
   <main class="shell">
     <section class="topbar">
       <div>
-        <div class="eyebrow">Gpt Proxy</div>
-        <h1>Gpt Proxy</h1>
-        <p class="subtitle">
+        <div class="eyebrow" data-i18n="appName">Gpt Proxy</div>
+        <h1 data-i18n="appTitle">Gpt Proxy</h1>
+        <p class="subtitle" data-i18n="appDescription">
           One control surface for both the browser build and the desktop build. Test the upstream endpoint, start the local proxy, copy the proxy address, and watch logs in one place.
         </p>
       </div>
-      <div class="control-chip" id="controlUrl">CONTROL // --</div>
+      <div class="topbar-tools">
+        <!-- 语言切换按钮 -->
+        <div class="lang-toggle" id="langToggle">
+          <span class="lang-toggle-icon">🌐</span>
+          <span id="langText">中文</span>
+        </div>
+        <div class="control-chip" id="controlUrl">CONTROL // --</div>
+      </div>
     </section>
 
     <section class="grid">
       <section class="card">
-        <h2 class="card-title">Connection</h2>
+        <h2 class="card-title" data-i18n="connectionTitle">Connection</h2>
         <div class="stack">
           <div class="two-col">
             <div>
-              <label for="hostMode">Host Mode</label>
+              <label for="hostMode" data-i18n="hostModeLabel">Host Mode</label>
               <select id="hostMode">
-                <option value="default">Default mode, derive the standard OpenAI path</option>
-                <option value="custom">Custom mode, use the exact URL</option>
+                <option value="default" data-i18n="hostModeDefault">Default mode, derive the standard OpenAI path</option>
+                <option value="custom" data-i18n="hostModeCustom">Custom mode, use the exact URL</option>
               </select>
             </div>
             <div>
-              <label for="protocol">Upstream Protocol</label>
+              <label for="protocol" data-i18n="protocolLabel">Upstream Protocol</label>
               <select id="protocol">
                 <option value="responses">Responses</option>
                 <option value="chat_completions">Chat Completions</option>
@@ -395,43 +466,56 @@
           </div>
 
           <div>
-            <label for="host">OpenAI Host</label>
+            <label for="host" data-i18n="hostLabel">OpenAI Host</label>
             <input id="host" type="text" placeholder="https://api.openai.com" value="https://api.openai.com" />
           </div>
 
           <div>
-            <label for="port">Proxy Port</label>
-            <input id="port" type="number" min="1" max="65535" placeholder="Leave empty for a random port" />
+            <label for="port" data-i18n="portLabel">Proxy Port</label>
+            <input id="port" type="number" min="1" max="65535" data-i18n-placeholder="portPlaceholder" />
           </div>
 
           <div class="two-col">
             <div>
-              <label for="key">API Key</label>
+              <label for="key" data-i18n="apiKeyLabel">API Key</label>
               <input id="key" type="password" placeholder="sk-..." />
             </div>
             <div>
-              <label for="model">Test Model</label>
+              <label for="model" data-i18n="modelLabel">Test Model</label>
               <input id="model" type="text" placeholder="gpt-5.4" value="gpt-5.4" />
             </div>
           </div>
 
           <div>
-            <label for="testMessage">Test Message</label>
-            <input id="testMessage" type="text" placeholder="hello" value="hello" />
+            <label for="testMessage" data-i18n="testMessageLabel">Test Message</label>
+            <input id="testMessage" type="text" data-i18n-placeholder="testMessagePlaceholder" value="hello" />
+          </div>
+
+          <!-- 新增：调试选项 -->
+          <div>
+            <label data-i18n="debugOptionsLabel">Debug Options</label>
+            <div class="checkbox-group">
+              <input type="checkbox" id="debugShowRequest" />
+              <label for="debugShowRequest" data-i18n="debugShowRequest">Show Request Body</label>
+            </div>
+            <div class="checkbox-group" style="margin-top: 8px;">
+              <input type="checkbox" id="debugShowResponse" />
+              <label for="debugShowResponse" data-i18n="debugShowResponse">Show Response Body</label>
+            </div>
           </div>
 
           <div class="state">
             <span class="state-dot" id="stateDot"></span>
-            <span id="stateText">Waiting for connection test</span>
+            <span id="stateText" data-i18n="stateWaiting">Waiting for connection test</span>
           </div>
 
           <div class="button-row">
-            <button class="secondary" id="testBtn">Test</button>
-            <button class="primary" id="startBtn" disabled>Start Proxy</button>
-            <button class="ghost" id="stopBtn" disabled>Stop Proxy</button>
+            <button class="secondary" id="testBtn" data-i18n="testButton">Test</button>
+            <button class="primary" id="startBtn" disabled data-i18n="startButton">Start Proxy</button>
+            <button class="ghost" id="stopBtn" disabled data-i18n="stopButton">Stop Proxy</button>
           </div>
 
-          <div class="hint" id="hintText">
+          <div class="hint" id="hintText" data-i18n="hintDefault">
             Default mode normalizes the host and appends <code>/v1/responses</code>. Custom mode forwards the exact URL you enter.
           </div>
           <div class="error" id="errorText"></div>
@@ -439,22 +523,22 @@
       </section>
 
       <section class="card">
-        <h2 class="card-title">Runtime</h2>
+        <h2 class="card-title" data-i18n="runtimeTitle">Runtime</h2>
         <div class="status-grid">
           <div class="metric">
-            <div class="metric-label">Proxy Base</div>
+            <div class="metric-label" data-i18n="proxyBaseLabel">Proxy Base</div>
             <div class="metric-value" id="proxyBase">--</div>
           </div>
           <div class="metric">
-            <div class="metric-label">Proxy Port</div>
+            <div class="metric-label" data-i18n="proxyPortLabel">Proxy Port</div>
             <div class="metric-value" id="proxyPort">--</div>
           </div>
           <div class="metric">
-            <div class="metric-label">Upstream Target</div>
+            <div class="metric-label" data-i18n="upstreamTargetLabel">Upstream Target</div>
             <div class="metric-value" id="upstreamUrl">--</div>
           </div>
           <div class="metric">
-            <div class="metric-label">Started At</div>
+            <div class="metric-label" data-i18n="startedAtLabel">Started At</div>
             <div class="metric-value" id="startedAt">--</div>
           </div>
         </div>
@@ -464,12 +548,149 @@
     </section>
 
     <section class="card log-card">
-      <h2 class="card-title">Logs</h2>
+      <h2 class="card-title" data-i18n="logsTitle">Logs</h2>
       <div class="log-window" id="logWindow"></div>
     </section>
   </main>
 
   <script>
+    // ==================== 国际化 (i18n) ====================
+    const translations = {
+      en: {
+        appName: "Gpt Proxy",
+        appTitle: "Gpt Proxy",
+        appDescription: "One control surface for both the browser build and the desktop build. Test the upstream endpoint, start the local proxy, copy the proxy address, and watch logs in one place.",
+        connectionTitle: "Connection",
+        hostModeLabel: "Host Mode",
+        hostModeDefault: "Default mode, derive the standard OpenAI path",
+        hostModeCustom: "Custom mode, use the exact URL",
+        protocolLabel: "Upstream Protocol",
+        hostLabel: "OpenAI Host",
+        portLabel: "Proxy Port",
+        portPlaceholder: "Leave empty for a random port",
+        apiKeyLabel: "API Key",
+        modelLabel: "Test Model",
+        testMessageLabel: "Test Message",
+        testMessagePlaceholder: "hello",
+        debugOptionsLabel: "Debug Options",
+        debugShowRequest: "Show Request Body",
+        debugShowResponse: "Show Response Body",
+        stateWaiting: "Waiting for connection test",
+        stateTesting: "Testing upstream connection",
+        stateTestPassed: "Connection test passed",
+        stateTestFailed: "Connection test failed",
+        stateStarting: "Starting proxy",
+        stateRunning: "Proxy is running",
+        stateStopped: "Proxy is stopped",
+        stateStopping: "Stopping proxy",
+        stateStartFailed: "Proxy start failed",
+        stateStopFailed: "Proxy stop failed",
+        testButton: "Test",
+        startButton: "Start Proxy",
+        stopButton: "Stop Proxy",
+        hintDefault: "Default mode normalizes the host and appends /v1/responses. Custom mode forwards the exact URL you enter.",
+        hintCustom: "Custom mode forwards the exact URL you enter as the upstream target.",
+        hintLastTest: "Last test target:",
+        runtimeTitle: "Runtime",
+        proxyBaseLabel: "Proxy Base",
+        proxyPortLabel: "Proxy Port",
+        upstreamTargetLabel: "Upstream Target",
+        startedAtLabel: "Started At",
+        logsTitle: "Logs",
+        routeLabel: "Route",
+        routeNotRunning: "Proxy is not running yet"
+      },
+      zh: {
+        appName: "GPT 代理",
+        appTitle: "GPT 代理",
+        appDescription: "浏览器版本和桌面版本的统一控制面板。在一个地方测试上游端点、启动本地代理、复制代理地址和查看日志。",
+        connectionTitle: "连接设置",
+        hostModeLabel: "主机模式",
+        hostModeDefault: "默认模式，自动推导标准 OpenAI 路径",
+        hostModeCustom: "自定义模式，使用精确的 URL",
+        protocolLabel: "上游协议",
+        hostLabel: "OpenAI 主机",
+        portLabel: "代理端口",
+        portPlaceholder: "留空则使用随机端口",
+        apiKeyLabel: "API 密钥",
+        modelLabel: "测试模型",
+        testMessageLabel: "测试消息",
+        testMessagePlaceholder: "你好",
+        debugOptionsLabel: "调试选项",
+        debugShowRequest: "显示请求体",
+        debugShowResponse: "显示响应体",
+        stateWaiting: "等待连接测试",
+        stateTesting: "正在测试上游连接",
+        stateTestPassed: "连接测试通过",
+        stateTestFailed: "连接测试失败",
+        stateStarting: "正在启动代理",
+        stateRunning: "代理正在运行",
+        stateStopped: "代理已停止",
+        stateStopping: "正在停止代理",
+        stateStartFailed: "代理启动失败",
+        stateStopFailed: "代理停止失败",
+        testButton: "测试",
+        startButton: "启动代理",
+        stopButton: "停止代理",
+        hintDefault: "默认模式会标准化主机并追加 /v1/responses。自定义模式直接转发您输入的确切 URL。",
+        hintCustom: "自定义模式会将您输入的确切 URL 作为上游目标进行转发。",
+        hintLastTest: "上次测试目标：",
+        runtimeTitle: "运行状态",
+        proxyBaseLabel: "代理地址",
+        proxyPortLabel: "代理端口",
+        upstreamTargetLabel: "上游目标",
+        startedAtLabel: "启动时间",
+        logsTitle: "日志",
+        routeLabel: "路由",
+        routeNotRunning: "代理尚未运行"
+      }
+    };
+
+    let currentLang = localStorage.getItem('language') || 'en';
+
+    function setLanguage(lang) {
+      currentLang = lang;
+      localStorage.setItem('language', lang);
+
+      // 更新所有带 data-i18n 属性的元素
+      document.querySelectorAll('[data-i18n]').forEach(element => {
+        const key = element.getAttribute('data-i18n');
+        if (translations[lang][key]) {
+          element.textContent = translations[lang][key];
+        }
+      });
+
+      // 更新带 data-i18n-placeholder 的元素
+      document.querySelectorAll('[data-i18n-placeholder]').forEach(element => {
+        const key = element.getAttribute('data-i18n-placeholder');
+        if (translations[lang][key]) {
+          element.placeholder = translations[lang][key];
+        }
+      });
+
+      // 更新 select 的 option
+      document.querySelectorAll('option[data-i18n]').forEach(option => {
+        const key = option.getAttribute('data-i18n');
+        if (translations[lang][key]) {
+          option.textContent = translations[lang][key];
+        }
+      });
+
+      // 更新语言切换按钮文本
+      document.getElementById('langText').textContent = lang === 'zh' ? 'English' : '中文';
+
+      // 更新 HTML lang 属性
+      document.documentElement.lang = lang;
+    }
+
+    // 语言切换
+    document.getElementById('langToggle').addEventListener('click', () => {
+      const newLang = currentLang === 'zh' ? 'en' : 'zh';
+      setLanguage(newLang);
+    });
+
+    // ==================== 原有逻辑 ====================
+
     const state = {
       busy: false,
       tested: false,
@@ -485,6 +706,8 @@
     const modelInput = document.getElementById("model");
     const testMessageInput = document.getElementById("testMessage");
     const portInput = document.getElementById("port");
+    const debugShowRequest = document.getElementById("debugShowRequest");
+    const debugShowResponse = document.getElementById("debugShowResponse");
     const testBtn = document.getElementById("testBtn");
     const startBtn = document.getElementById("startBtn");
     const stopBtn = document.getElementById("stopBtn");
@@ -511,8 +734,8 @@
       stopBtn.disabled = state.busy || !state.running;
     }
 
-    function setState(label, live) {
-      stateText.textContent = label;
+    function setState(labelKey, live) {
+      stateText.textContent = translations[currentLang][labelKey] || labelKey;
       stateDot.classList.toggle("live", Boolean(live));
     }
 
@@ -549,13 +772,18 @@
         `[TEST] status=${result.status_code} ok=${Boolean(result.ok)}`
       ];
 
-      if (result.request_payload) {
+      // 根据调试开关显示请求
+      if (debugShowRequest.checked && result.request_payload) {
         lines.push("[TEST] request:");
         lines.push(prettyBlock(result.request_payload));
       }
 
-      lines.push("[TEST] response:");
-      lines.push(prettyBlock(result.response_json || result.response_body || "(empty)"));
+      // 根据调试开关显示响应
+      if (debugShowResponse.checked) {
+        lines.push("[TEST] response:");
+        lines.push(prettyBlock(result.response_json || result.response_body || "(empty)"));
+      }
+
       appendLog(lines.join("\n"));
     }
 
@@ -564,7 +792,7 @@
       if (!routeList || routeList.length === 0) {
         const item = document.createElement("div");
         item.className = "route";
-        item.innerHTML = '<div class="route-name">Route</div><div class="route-url">Proxy is not running yet</div>';
+        item.innerHTML = `<div class="route-name">${translations[currentLang].routeLabel}</div><div class="route-url">${translations[currentLang].routeNotRunning}</div>`;
         routes.appendChild(item);
         return;
       }
@@ -588,7 +816,7 @@
       upstreamUrl.textContent = status.upstream_target_url || status.upstream_responses_url || "--";
       startedAt.textContent = status.started_at || "--";
       renderRoutes(status.routes || []);
-      setState(status.running ? "Proxy is running" : "Proxy is stopped", status.running);
+      setState(status.running ? "stateRunning" : "stateStopped", status.running);
       syncButtons();
     }
 
@@ -596,9 +824,12 @@
       const protocolPath = protocolInput.value === "chat_completions"
         ? "/v1/chat/completions"
         : "/v1/responses";
-      hintText.textContent = hostModeInput.value === "custom"
-        ? `Custom mode forwards the exact URL you enter as the upstream ${protocolInput.value === "chat_completions" ? "chat completions" : "responses"} target.`
-        : `Default mode normalizes the host first and appends the standard OpenAI path ${protocolPath}.`;
+
+      if (hostModeInput.value === "custom") {
+        hintText.innerHTML = translations[currentLang].hintCustom;
+      } else {
+        hintText.innerHTML = translations[currentLang].hintDefault.replace('/v1/responses', `<code>/v1/responses</code>`);
+      }
     }
 
     async function fetchJSON(url, options) {
@@ -630,7 +861,7 @@
       setError("");
       setBusy(true);
       state.tested = false;
-      setState("Testing upstream connection", false);
+      setState("stateTesting", false);
 
       try {
         const response = await fetch("/api/test-connection", {
@@ -661,15 +892,15 @@
 
         appendTestLog(result);
         state.tested = Boolean(result.ok);
-        hintText.textContent = `Last test target: ${result.upstream_target || result.responses_proxy_target}`;
-        setState(result.ok ? "Connection test passed" : "Connection test failed", false);
+        hintText.textContent = `${translations[currentLang].hintLastTest} ${result.upstream_target || result.responses_proxy_target}`;
+        setState(result.ok ? "stateTestPassed" : "stateTestFailed", false);
         if (!result.ok) {
           setError(`Upstream returned status ${result.status_code}`);
         }
       } catch (error) {
         state.tested = false;
         setError(error.message);
-        setState("Connection test failed", false);
+        setState("stateTestFailed", false);
       } finally {
         setBusy(false);
       }
@@ -678,7 +909,7 @@
     async function startProxy() {
       setError("");
       setBusy(true);
-      setState("Starting proxy", false);
+      setState("stateStarting", false);
 
       const rawPort = portInput.value.trim();
       const port = rawPort === "" ? 0 : Number(rawPort);
@@ -697,7 +928,7 @@
         renderStatus(status);
       } catch (error) {
         setError(error.message);
-        setState("Proxy start failed", false);
+        setState("stateStartFailed", false);
       } finally {
         setBusy(false);
       }
@@ -706,7 +937,7 @@
     async function stopProxy() {
       setError("");
       setBusy(true);
-      setState("Stopping proxy", false);
+      setState("stateStopping", false);
 
       try {
         const status = await fetchJSON("/api/stop", {
@@ -716,7 +947,7 @@
         renderStatus(status);
       } catch (error) {
         setError(error.message);
-        setState("Proxy stop failed", false);
+        setState("stateStopFailed", false);
       } finally {
         setBusy(false);
       }
@@ -776,6 +1007,15 @@
       setError("");
     });
 
+    // 保存调试设置到 localStorage
+    debugShowRequest.addEventListener("change", () => {
+      localStorage.setItem('debugShowRequest', debugShowRequest.checked);
+    });
+
+    debugShowResponse.addEventListener("change", () => {
+      localStorage.setItem('debugShowResponse', debugShowResponse.checked);
+    });
+
     window.addEventListener("beforeunload", () => {
       if (state.reconnectTimer) {
         clearTimeout(state.reconnectTimer);
@@ -789,8 +1029,15 @@
     startBtn.addEventListener("click", startProxy);
     stopBtn.addEventListener("click", stopProxy);
 
+    // 初始化
+    setLanguage(currentLang);
     updateHintText();
     syncButtons();
+
+    // 恢复调试设置
+    debugShowRequest.checked = localStorage.getItem('debugShowRequest') === 'true';
+    debugShowResponse.checked = localStorage.getItem('debugShowResponse') === 'true';
+
     attachLogs();
     loadStatus().catch((error) => {
       setError(error.message);
