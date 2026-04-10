@@ -46,6 +46,51 @@ func promptToInput(raw json.RawMessage) (any, error) {
 	return nil, errors.New("prompt must be a string or array")
 }
 
+func normalizeUpstreamProtocol(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", upstreamProtocolResponses:
+		return upstreamProtocolResponses
+	case upstreamProtocolChatCompletions:
+		return upstreamProtocolChatCompletions
+	default:
+		return ""
+	}
+}
+
+func normalizeChatCompletionsUpstreamBody(body []byte) ([]byte, openAIChatCompletionsRequestMeta, error) {
+	meta := openAIChatCompletionsRequestMeta{}
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 {
+		return nil, meta, errors.New("request body is required")
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(trimmed, &payload); err != nil {
+		return nil, meta, err
+	}
+
+	if model, ok := payload["model"].(string); ok {
+		meta.Model = strings.TrimSpace(model)
+	}
+	if stream, ok := payload["stream"].(bool); ok {
+		meta.Stream = stream
+	}
+
+	payload["stream"] = true
+	streamOptions, ok := payload["stream_options"].(map[string]any)
+	if !ok || streamOptions == nil {
+		streamOptions = map[string]any{}
+	}
+	streamOptions["include_usage"] = true
+	payload["stream_options"] = streamOptions
+
+	normalized, err := json.Marshal(payload)
+	if err != nil {
+		return nil, meta, err
+	}
+	return normalized, meta, nil
+}
+
 func chatMessagesToResponsesInput(messages []openAIChatInputMessage) ([]map[string]any, error) {
 	input := make([]map[string]any, 0, len(messages))
 	for _, message := range messages {
@@ -59,6 +104,301 @@ func chatMessagesToResponsesInput(messages []openAIChatInputMessage) ([]map[stri
 		})
 	}
 	return input, nil
+}
+
+func responsesRequestToChatCompletions(req openAIResponsesBridgeRequest) (openAIChatCompletionsRequest, error) {
+	if strings.TrimSpace(req.Model) == "" {
+		return openAIChatCompletionsRequest{}, errors.New("model is required")
+	}
+
+	instructions, err := responsesInstructionsToString(req.Instructions)
+	if err != nil {
+		return openAIChatCompletionsRequest{}, err
+	}
+
+	messages, err := responsesInputToChatMessages(req.Input)
+	if err != nil {
+		return openAIChatCompletionsRequest{}, err
+	}
+	if instructions != "" {
+		messages = append([]openAIChatInputMessage{{
+			Role:    "system",
+			Content: instructions,
+		}}, messages...)
+	}
+
+	return openAIChatCompletionsRequest{
+		Model:       strings.TrimSpace(req.Model),
+		Messages:    messages,
+		MaxTokens:   req.MaxOutputTokens,
+		Temperature: req.Temperature,
+		TopP:        req.TopP,
+		Stream:      req.Stream,
+	}, nil
+}
+
+func responsesRequestPayloadToChatCompletions(req openAIResponsesRequest) (openAIChatCompletionsRequest, error) {
+	inputRaw, err := json.Marshal(req.Input)
+	if err != nil {
+		return openAIChatCompletionsRequest{}, fmt.Errorf("marshal input: %w", err)
+	}
+
+	var instructionsRaw json.RawMessage
+	if strings.TrimSpace(req.Instructions) != "" {
+		instructionsRaw, err = json.Marshal(req.Instructions)
+		if err != nil {
+			return openAIChatCompletionsRequest{}, fmt.Errorf("marshal instructions: %w", err)
+		}
+	}
+
+	return responsesRequestToChatCompletions(openAIResponsesBridgeRequest{
+		Model:           req.Model,
+		Instructions:    instructionsRaw,
+		Input:           json.RawMessage(inputRaw),
+		MaxOutputTokens: req.MaxOutputTokens,
+		Temperature:     req.Temperature,
+		TopP:            req.TopP,
+		Stream:          req.Stream,
+	})
+}
+
+func forceStreamingChatCompletionsRequest(req openAIChatCompletionsRequest) openAIChatCompletionsRequest {
+	req.Stream = true
+	if req.StreamOptions == nil {
+		req.StreamOptions = &openAIChatStreamOptions{}
+	}
+	req.StreamOptions.IncludeUsage = true
+	return req
+}
+
+func responsesInstructionsToString(raw json.RawMessage) (string, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || string(trimmed) == "null" {
+		return "", nil
+	}
+
+	var text string
+	if err := json.Unmarshal(trimmed, &text); err == nil {
+		return text, nil
+	}
+
+	return "", errors.New("instructions must be a string")
+}
+
+func responsesInputToChatMessages(raw json.RawMessage) ([]openAIChatInputMessage, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || string(trimmed) == "null" {
+		return nil, errors.New("input is required")
+	}
+
+	var text string
+	if err := json.Unmarshal(trimmed, &text); err == nil {
+		if strings.TrimSpace(text) == "" {
+			return nil, errors.New("input string must not be empty")
+		}
+		return []openAIChatInputMessage{{
+			Role:    "user",
+			Content: text,
+		}}, nil
+	}
+
+	var messages []responsesInputMessage
+	if err := json.Unmarshal(trimmed, &messages); err == nil {
+		out := make([]openAIChatInputMessage, 0, len(messages))
+		for idx, message := range messages {
+			if strings.TrimSpace(message.Type) != "" && message.Type != "message" {
+				return nil, fmt.Errorf("input[%d] type %q is not supported", idx, message.Type)
+			}
+			if strings.TrimSpace(message.Role) == "" {
+				return nil, fmt.Errorf("input[%d] role is required", idx)
+			}
+			content, err := responsesMessageContentToString(message.Content)
+			if err != nil {
+				return nil, fmt.Errorf("input[%d]: %w", idx, err)
+			}
+			out = append(out, openAIChatInputMessage{
+				Role:    message.Role,
+				Content: content,
+			})
+		}
+		if len(out) == 0 {
+			return nil, errors.New("input must contain at least one message")
+		}
+		return out, nil
+	}
+
+	return nil, errors.New("input must be a string or an array of message objects")
+}
+
+type responsesInputMessage struct {
+	Type    string          `json:"type"`
+	Role    string          `json:"role"`
+	Content json.RawMessage `json:"content"`
+}
+
+type responsesInputContentBlock struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
+func responsesMessageContentToString(raw json.RawMessage) (string, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || string(trimmed) == "null" {
+		return "", errors.New("content is required")
+	}
+
+	var text string
+	if err := json.Unmarshal(trimmed, &text); err == nil {
+		return text, nil
+	}
+
+	var blocks []responsesInputContentBlock
+	if err := json.Unmarshal(trimmed, &blocks); err == nil {
+		var builder strings.Builder
+		for idx, block := range blocks {
+			switch block.Type {
+			case "input_text", "output_text", "text":
+				builder.WriteString(block.Text)
+			default:
+				return "", fmt.Errorf("content[%d] type %q is not supported", idx, block.Type)
+			}
+		}
+		return builder.String(), nil
+	}
+
+	return "", errors.New("content must be a string or a text content array")
+}
+
+func chatCompletionsToResponses(resp openAIChatCompletionsResponse) openAIResponsesResponse {
+	text, finishReason := extractChatCompletionText(resp)
+	status, incomplete := responseStatusFromCompletionFinishReason(finishReason)
+
+	output := []openAIResponseOutput{}
+	if text != "" {
+		output = []openAIResponseOutput{{
+			Type: "message",
+			Role: "assistant",
+			Content: []openAIResponseContent{{
+				Type: "output_text",
+				Text: text,
+			}},
+		}}
+	}
+
+	return openAIResponsesResponse{
+		Object:            "response",
+		ID:                resp.ID,
+		Model:             resp.Model,
+		CreatedAt:         resp.Created,
+		Status:            status,
+		Output:            output,
+		IncompleteDetails: incomplete,
+		Usage:             chatUsageToResponsesUsage(resp.Usage),
+	}
+}
+
+func extractChatCompletionText(resp openAIChatCompletionsResponse) (string, string) {
+	if len(resp.Choices) == 0 {
+		return "", ""
+	}
+	choice := resp.Choices[0]
+	return choice.Message.Content, choice.FinishReason
+}
+
+func responseStatusFromCompletionFinishReason(reason string) (string, *openAIIncompleteDetail) {
+	switch strings.TrimSpace(reason) {
+	case "length":
+		return "incomplete", &openAIIncompleteDetail{Reason: "max_output_tokens"}
+	default:
+		return "completed", nil
+	}
+}
+
+func chatUsageToResponsesUsage(usage *openAIChatUsage) *openAIUsage {
+	if usage == nil {
+		return nil
+	}
+	return &openAIUsage{
+		InputTokens:  usage.PromptTokens,
+		OutputTokens: usage.CompletionTokens,
+		TotalTokens:  usage.TotalTokens,
+	}
+}
+
+func responsesUsageToChatUsage(usage *openAIUsage) *openAIChatUsage {
+	if usage == nil {
+		return nil
+	}
+	return &openAIChatUsage{
+		PromptTokens:     usage.InputTokens,
+		CompletionTokens: usage.OutputTokens,
+		TotalTokens:      usage.TotalTokens,
+	}
+}
+
+func aggregateChatCompletionsStream(r io.Reader, fallbackModel string) (openAIChatCompletionsResponse, error) {
+	state := streamState{Model: fallbackModel}
+	role := ""
+	finishReason := ""
+	var text strings.Builder
+	var usage *openAIChatUsage
+	sawChunk := false
+
+	err := consumeSSE(r, func(evt sseEvent) error {
+		if evt.Data == "" || evt.Data == "[DONE]" {
+			return nil
+		}
+
+		var chunk openAIChatCompletionChunkResponse
+		if err := json.Unmarshal([]byte(evt.Data), &chunk); err != nil {
+			return err
+		}
+		sawChunk = true
+		state.ID = coalesce(chunk.ID, state.ID)
+		state.Model = coalesce(chunk.Model, state.Model, fallbackModel)
+		state.CreatedAt = createdAtOrNow(chunk.Created)
+
+		if chunk.Usage != nil {
+			usage = chunk.Usage
+		}
+		if len(chunk.Choices) == 0 {
+			return nil
+		}
+
+		choice := chunk.Choices[0]
+		if choice.Delta.Role != "" {
+			role = choice.Delta.Role
+		}
+		if choice.Delta.Content != "" {
+			text.WriteString(choice.Delta.Content)
+		}
+		if strings.TrimSpace(choice.FinishReason) != "" {
+			finishReason = choice.FinishReason
+		}
+		return nil
+	})
+	if err != nil {
+		return openAIChatCompletionsResponse{}, err
+	}
+	if !sawChunk {
+		return openAIChatCompletionsResponse{}, errors.New("chat completions stream produced no chunks")
+	}
+
+	return openAIChatCompletionsResponse{
+		ID:      state.ID,
+		Object:  "chat.completion",
+		Created: createdAtOrNow(state.CreatedAt),
+		Model:   coalesce(state.Model, fallbackModel),
+		Choices: []openAIChatCompletionChoice{{
+			Index: 0,
+			Message: openAIChatOutputMessage{
+				Role:    coalesce(role, "assistant"),
+				Content: text.String(),
+			},
+			FinishReason: finishReason,
+		}},
+		Usage: usage,
+	}, nil
 }
 
 func parseStopSequences(raw json.RawMessage) ([]string, error) {

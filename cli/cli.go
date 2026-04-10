@@ -87,7 +87,7 @@ func runCLI(args []string, stdin io.Reader, stdout io.Writer) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := app.StartProxy(ctx, host, "", opts.port, hostMode); err != nil {
+	if err := app.StartProxy(ctx, host, "", opts.port, hostMode, "responses"); err != nil {
 		return err
 	}
 	stopped := false

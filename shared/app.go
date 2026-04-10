@@ -39,18 +39,21 @@ type App struct {
 }
 
 type runningProxy struct {
-	server       *http.Server
-	listener     net.Listener
-	displayURL   string
-	responsesURL string
-	startedAt    time.Time
+	server      *http.Server
+	listener    net.Listener
+	displayURL  string
+	upstreamURL string
+	protocol    string
+	startedAt   time.Time
 }
 
 type testConnectionRequest struct {
-	Host     string `json:"host"`
-	Key      string `json:"key"`
-	Model    string `json:"model,omitempty"`
-	HostMode string `json:"host_mode,omitempty"`
+	Host        string `json:"host"`
+	Key         string `json:"key"`
+	Model       string `json:"model,omitempty"`
+	HostMode    string `json:"host_mode,omitempty"`
+	Protocol    string `json:"protocol,omitempty"`
+	TestMessage string `json:"test_message,omitempty"`
 }
 
 type startProxyRequest struct {
@@ -58,6 +61,7 @@ type startProxyRequest struct {
 	Key      string `json:"key"`
 	Port     int    `json:"port,omitempty"`
 	HostMode string `json:"host_mode,omitempty"`
+	Protocol string `json:"protocol,omitempty"`
 }
 
 type StatusResponse struct {
@@ -65,7 +69,9 @@ type StatusResponse struct {
 	ControlURL        string         `json:"control_url"`
 	ProxyBaseURL      string         `json:"proxy_base_url,omitempty"`
 	ProxyPort         int            `json:"proxy_port,omitempty"`
+	UpstreamTarget    string         `json:"upstream_target_url,omitempty"`
 	UpstreamResponses string         `json:"upstream_responses_url,omitempty"`
+	UpstreamProtocol  string         `json:"upstream_protocol,omitempty"`
 	Routes            []RouteDisplay `json:"routes"`
 	StartedAt         string         `json:"started_at,omitempty"`
 }
@@ -76,10 +82,35 @@ type RouteDisplay struct {
 	URL  string `json:"url"`
 }
 
+type OpenAITestResult struct {
+	OK                   bool            `json:"ok"`
+	NormalizedHost       string          `json:"normalized_host,omitempty"`
+	UpstreamTarget       string          `json:"upstream_target"`
+	ResponsesProxyTarget string          `json:"responses_proxy_target,omitempty"`
+	UpstreamProtocol     string          `json:"upstream_protocol"`
+	Model                string          `json:"model"`
+	TestMessage          string          `json:"test_message"`
+	StatusCode           int             `json:"status_code"`
+	RequestPayload       json.RawMessage `json:"request_payload,omitempty"`
+	ResponseBody         string          `json:"response_body,omitempty"`
+	ResponseJSON         json.RawMessage `json:"response_json,omitempty"`
+}
+
 type OpenAITarget struct {
-	DisplayURL   string
-	ModelsURL    string
-	ResponsesURL string
+	DisplayURL         string
+	ModelsURL          string
+	ResponsesURL       string
+	ChatCompletionsURL string
+	UpstreamProtocol   string
+}
+
+func (t OpenAITarget) UpstreamURL() string {
+	switch normalizeUpstreamProtocol(t.UpstreamProtocol) {
+	case upstreamProtocolChatCompletions:
+		return t.ChatCompletionsURL
+	default:
+		return t.ResponsesURL
+	}
 }
 
 func NewApp(opts AppOptions) (*App, error) {
@@ -262,10 +293,10 @@ func (a *App) SetProxyHosts(bindHost, displayHost string) {
 	}
 }
 
-func (a *App) StartProxy(ctx context.Context, host, key string, port int, hostMode string) error {
+func (a *App) StartProxy(ctx context.Context, host, key string, port int, hostMode, protocol string) error {
 	_ = ctx
 
-	target, err := ResolveOpenAITarget(host, hostMode)
+	target, err := ResolveOpenAITarget(host, hostMode, protocol)
 	if err != nil {
 		return err
 	}
@@ -296,11 +327,13 @@ func (a *App) StartProxy(ctx context.Context, host, key string, port int, hostMo
 	displayURL := fmt.Sprintf("http://%s:%d", displayHost, actualPort)
 
 	proxyCfg := Config{
-		ListenAddr:   ln.Addr().String(),
-		ModelsURL:    target.ModelsURL,
-		ResponsesURL: target.ResponsesURL,
-		APIKey:       strings.TrimSpace(key),
-		Timeout:      a.timeout,
+		ListenAddr:         ln.Addr().String(),
+		ModelsURL:          target.ModelsURL,
+		ResponsesURL:       target.ResponsesURL,
+		ChatCompletionsURL: target.ChatCompletionsURL,
+		UpstreamProtocol:   target.UpstreamProtocol,
+		APIKey:             strings.TrimSpace(key),
+		Timeout:            a.timeout,
 	}
 	proxySrv := newServerWithLogger(proxyCfg, a.logger)
 	httpSrv := &http.Server{Handler: proxySrv.Routes()}
@@ -308,11 +341,12 @@ func (a *App) StartProxy(ctx context.Context, host, key string, port int, hostMo
 	a.mu.Lock()
 	old := a.proxy
 	a.proxy = &runningProxy{
-		server:       httpSrv,
-		listener:     ln,
-		displayURL:   displayURL,
-		responsesURL: target.ResponsesURL,
-		startedAt:    time.Now(),
+		server:      httpSrv,
+		listener:    ln,
+		displayURL:  displayURL,
+		upstreamURL: target.UpstreamURL(),
+		protocol:    target.UpstreamProtocol,
+		startedAt:   time.Now(),
 	}
 	a.mu.Unlock()
 
@@ -328,6 +362,7 @@ func (a *App) StartProxy(ctx context.Context, host, key string, port int, hostMo
 	}()
 
 	a.logger.Printf("proxy started on %s", displayURL)
+	a.logger.Printf("upstream protocol: %s", target.UpstreamProtocol)
 	a.logger.Printf("OpenAI Models route: %s/v1/models", displayURL)
 	a.logger.Printf("OpenAI Responses route: %s/v1/responses", displayURL)
 	a.logger.Printf("Claude Messages route: %s/v1/messages", displayURL)
@@ -383,7 +418,9 @@ func (a *App) SnapshotStatus() StatusResponse {
 	}
 
 	resp.ProxyBaseURL = a.proxy.displayURL
-	resp.UpstreamResponses = a.proxy.responsesURL
+	resp.UpstreamTarget = a.proxy.upstreamURL
+	resp.UpstreamResponses = a.proxy.upstreamURL
+	resp.UpstreamProtocol = a.proxy.protocol
 	resp.StartedAt = a.proxy.startedAt.Format(time.RFC3339)
 	resp.Routes = []RouteDisplay{
 		{Name: "OpenAI Models", Path: "/v1/models", URL: a.proxy.displayURL + "/v1/models"},
@@ -445,6 +482,178 @@ func (a *App) CheckResponsesCompatibility(ctx context.Context, responsesURL, key
 	return nil
 }
 
+func (a *App) CheckChatCompletionsCompatibility(ctx context.Context, chatCompletionsURL, key, model string) error {
+	payload := openAIChatCompletionsRequest{
+		Model: strings.TrimSpace(model),
+		Messages: []openAIChatInputMessage{{
+			Role:    "user",
+			Content: "ping",
+		}},
+		MaxTokens: 16,
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal chat completions preflight: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, chatCompletionsURL, strings.NewReader(string(body)))
+	if err != nil {
+		return fmt.Errorf("build chat completions preflight request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	if strings.TrimSpace(key) != "" {
+		req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(key))
+	}
+
+	client := &http.Client{Timeout: a.timeout}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("conversation request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		raw, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+		if readErr != nil {
+			return fmt.Errorf("conversation status %d and failed to read body: %w", resp.StatusCode, readErr)
+		}
+		return fmt.Errorf("conversation status %d for model %s: %s", resp.StatusCode, model, strings.TrimSpace(string(raw)))
+	}
+	return nil
+}
+
+func (a *App) CheckOpenAICompatibility(ctx context.Context, target OpenAITarget, key, model string) error {
+	switch normalizeUpstreamProtocol(target.UpstreamProtocol) {
+	case upstreamProtocolChatCompletions:
+		return a.CheckChatCompletionsCompatibility(ctx, target.ChatCompletionsURL, key, model)
+	default:
+		return a.CheckResponsesCompatibility(ctx, target.ResponsesURL, key, model)
+	}
+}
+
+func (a *App) RunOpenAITest(ctx context.Context, target OpenAITarget, key, model, testMessage string) (OpenAITestResult, error) {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return OpenAITestResult{}, errors.New("model is required for connection test")
+	}
+
+	message := strings.TrimSpace(testMessage)
+	if message == "" {
+		message = "hello"
+	}
+
+	result := OpenAITestResult{
+		NormalizedHost:       target.DisplayURL,
+		UpstreamTarget:       target.UpstreamURL(),
+		ResponsesProxyTarget: target.UpstreamURL(),
+		UpstreamProtocol:     normalizeUpstreamProtocol(target.UpstreamProtocol),
+		Model:                model,
+		TestMessage:          message,
+	}
+
+	switch result.UpstreamProtocol {
+	case upstreamProtocolChatCompletions:
+		payload := forceStreamingChatCompletionsRequest(openAIChatCompletionsRequest{
+			Model: model,
+			Messages: []openAIChatInputMessage{{
+				Role:    "user",
+				Content: message,
+			}},
+			MaxTokens: 16,
+		})
+		return a.executeOpenAIStreamTestRequest(ctx, result, key, target.ChatCompletionsURL, payload)
+	default:
+		payload := openAIResponsesRequest{
+			Model: model,
+			Input: []map[string]any{{
+				"type":    "message",
+				"role":    "user",
+				"content": message,
+			}},
+			MaxOutputTokens: 16,
+			Stream:          true,
+		}
+		return a.executeOpenAIStreamTestRequest(ctx, result, key, target.ResponsesURL, payload)
+	}
+}
+
+func (a *App) executeOpenAITestRequest(ctx context.Context, result OpenAITestResult, key, targetURL string, payload any) (OpenAITestResult, error) {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return OpenAITestResult{}, fmt.Errorf("marshal test request: %w", err)
+	}
+	result.RequestPayload = json.RawMessage(body)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, strings.NewReader(string(body)))
+	if err != nil {
+		return OpenAITestResult{}, fmt.Errorf("build test request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	if strings.TrimSpace(key) != "" {
+		req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(key))
+	}
+
+	client := &http.Client{Timeout: a.timeout}
+	resp, err := client.Do(req)
+	if err != nil {
+		return OpenAITestResult{}, fmt.Errorf("conversation request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return OpenAITestResult{}, fmt.Errorf("read test response body: %w", err)
+	}
+
+	result.StatusCode = resp.StatusCode
+	result.OK = resp.StatusCode >= 200 && resp.StatusCode < 300
+	result.ResponseBody = strings.TrimSpace(string(raw))
+
+	if json.Valid(raw) {
+		result.ResponseJSON = json.RawMessage(raw)
+	}
+
+	return result, nil
+}
+
+func (a *App) executeOpenAIStreamTestRequest(ctx context.Context, result OpenAITestResult, key, targetURL string, payload any) (OpenAITestResult, error) {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return OpenAITestResult{}, fmt.Errorf("marshal test request: %w", err)
+	}
+	result.RequestPayload = json.RawMessage(body)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, strings.NewReader(string(body)))
+	if err != nil {
+		return OpenAITestResult{}, fmt.Errorf("build test request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
+	if strings.TrimSpace(key) != "" {
+		req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(key))
+	}
+
+	client := &http.Client{Timeout: a.timeout}
+	resp, err := client.Do(req)
+	if err != nil {
+		return OpenAITestResult{}, fmt.Errorf("conversation request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return OpenAITestResult{}, fmt.Errorf("read test response body: %w", err)
+	}
+
+	result.StatusCode = resp.StatusCode
+	result.OK = resp.StatusCode >= 200 && resp.StatusCode < 300
+	result.ResponseBody = strings.TrimSpace(string(raw))
+	return result, nil
+}
+
 func (a *App) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -465,7 +674,7 @@ func (a *App) handleTestConnection(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	target, err := ResolveOpenAITarget(req.Host, req.HostMode)
+	target, err := ResolveOpenAITarget(req.Host, req.HostMode, req.Protocol)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -476,19 +685,15 @@ func (a *App) handleTestConnection(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := a.CheckResponsesCompatibility(r.Context(), target.ResponsesURL, req.Key, req.Model); err != nil {
+	result, err := a.RunOpenAITest(r.Context(), target, req.Key, req.Model, req.TestMessage)
+	if err != nil {
 		a.logger.Printf("conversation test failed for %s model=%s: %v", target.DisplayURL, req.Model, err)
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
 
-	a.logger.Printf("conversation test succeeded for %s model=%s", target.DisplayURL, req.Model)
-	writeJSON(w, http.StatusOK, map[string]string{
-		"status":                 "ok",
-		"normalized_host":        target.DisplayURL,
-		"responses_proxy_target": target.ResponsesURL,
-		"conversation_checked":   "ok",
-	})
+	a.logger.Printf("conversation test completed for %s model=%s protocol=%s upstream_status=%d ok=%t", target.DisplayURL, result.Model, result.UpstreamProtocol, result.StatusCode, result.OK)
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (a *App) handleStart(w http.ResponseWriter, r *http.Request) {
@@ -503,7 +708,7 @@ func (a *App) handleStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := a.StartProxy(r.Context(), req.Host, req.Key, req.Port, req.HostMode); err != nil {
+	if err := a.StartProxy(r.Context(), req.Host, req.Key, req.Port, req.HostMode, req.Protocol); err != nil {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
@@ -565,7 +770,12 @@ func (a *App) handleLogs(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func ResolveOpenAITarget(raw, mode string) (OpenAITarget, error) {
+func ResolveOpenAITarget(raw, mode, protocol string) (OpenAITarget, error) {
+	upstreamProtocol := normalizeUpstreamProtocol(protocol)
+	if upstreamProtocol == "" {
+		return OpenAITarget{}, errors.New("protocol must be responses or chat_completions")
+	}
+
 	switch strings.ToLower(strings.TrimSpace(mode)) {
 	case "", "default":
 		baseURL, modelsURL, responsesURL, err := NormalizeOpenAIHost(raw)
@@ -573,19 +783,27 @@ func ResolveOpenAITarget(raw, mode string) (OpenAITarget, error) {
 			return OpenAITarget{}, err
 		}
 		return OpenAITarget{
-			DisplayURL:   baseURL,
-			ModelsURL:    modelsURL,
-			ResponsesURL: responsesURL,
+			DisplayURL:         baseURL,
+			ModelsURL:          modelsURL,
+			ResponsesURL:       responsesURL,
+			ChatCompletionsURL: baseURL + "/v1/chat/completions",
+			UpstreamProtocol:   upstreamProtocol,
 		}, nil
 	case "custom":
 		exactURL, err := NormalizeAbsoluteURL(raw)
 		if err != nil {
 			return OpenAITarget{}, err
 		}
-		return OpenAITarget{
-			DisplayURL:   exactURL,
-			ResponsesURL: exactURL,
-		}, nil
+		target := OpenAITarget{
+			DisplayURL:       exactURL,
+			UpstreamProtocol: upstreamProtocol,
+		}
+		if upstreamProtocol == upstreamProtocolChatCompletions {
+			target.ChatCompletionsURL = exactURL
+		} else {
+			target.ResponsesURL = exactURL
+		}
+		return target, nil
 	default:
 		return OpenAITarget{}, errors.New("host_mode must be default or custom")
 	}
@@ -605,6 +823,8 @@ func NormalizeOpenAIHost(raw string) (baseURL string, modelsURL string, response
 	switch {
 	case strings.HasSuffix(path, "/v1/responses"):
 		path = strings.TrimSuffix(path, "/v1/responses")
+	case strings.HasSuffix(path, "/v1/chat/completions"):
+		path = strings.TrimSuffix(path, "/v1/chat/completions")
 	case strings.HasSuffix(path, "/v1"):
 		path = strings.TrimSuffix(path, "/v1")
 	}

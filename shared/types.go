@@ -8,12 +8,19 @@ import (
 
 const defaultResponsesURL = "https://api.openai.com/v1/responses"
 
+const (
+	upstreamProtocolResponses       = "responses"
+	upstreamProtocolChatCompletions = "chat_completions"
+)
+
 type Config struct {
-	ListenAddr   string
-	ModelsURL    string
-	ResponsesURL string
-	APIKey       string
-	Timeout      time.Duration
+	ListenAddr         string
+	ModelsURL          string
+	ResponsesURL       string
+	ChatCompletionsURL string
+	UpstreamProtocol   string
+	APIKey             string
+	Timeout            time.Duration
 }
 
 type Server struct {
@@ -113,13 +120,15 @@ type claudeErrorInner struct {
 }
 
 type openAIChatCompletionsRequest struct {
-	Model       string                   `json:"model"`
-	Messages    []openAIChatInputMessage `json:"messages"`
-	MaxTokens   int                      `json:"max_tokens,omitempty"`
-	Temperature *float64                 `json:"temperature,omitempty"`
-	TopP        *float64                 `json:"top_p,omitempty"`
-	Stop        json.RawMessage          `json:"stop,omitempty"`
-	Stream      bool                     `json:"stream,omitempty"`
+	Model         string                   `json:"model"`
+	Messages      []openAIChatInputMessage `json:"messages"`
+	MaxTokens     int                      `json:"max_tokens,omitempty"`
+	Temperature   *float64                 `json:"temperature,omitempty"`
+	TopP          *float64                 `json:"top_p,omitempty"`
+	Stop          json.RawMessage          `json:"stop,omitempty"`
+	Stream        bool                     `json:"stream,omitempty"`
+	Verbosity     string                   `json:"verbosity,omitempty"`
+	StreamOptions *openAIChatStreamOptions `json:"stream_options,omitempty"`
 }
 
 type openAIChatInputMessage struct {
@@ -133,7 +142,7 @@ type openAIChatCompletionsResponse struct {
 	Created int64                        `json:"created"`
 	Model   string                       `json:"model"`
 	Choices []openAIChatCompletionChoice `json:"choices"`
-	Usage   *openAIUsage                 `json:"usage,omitempty"`
+	Usage   *openAIChatUsage             `json:"usage,omitempty"`
 }
 
 type openAIChatCompletionChoice struct {
@@ -154,6 +163,7 @@ type openAIChatCompletionChunkResponse struct {
 	Created int64                             `json:"created"`
 	Model   string                            `json:"model"`
 	Choices []openAIChatCompletionChunkChoice `json:"choices"`
+	Usage   *openAIChatUsage                  `json:"usage,omitempty"`
 }
 
 type openAIChatCompletionChunkChoice struct {
@@ -179,6 +189,7 @@ type openAIResponsesRequest struct {
 }
 
 type openAIResponsesResponse struct {
+	Object            string                  `json:"object,omitempty"`
 	ID                string                  `json:"id"`
 	Model             string                  `json:"model"`
 	CreatedAt         int64                   `json:"created_at"`
@@ -230,10 +241,37 @@ type openAIResponsesRequestMeta struct {
 	Stream bool   `json:"stream"`
 }
 
+type openAIChatCompletionsRequestMeta struct {
+	Model  string `json:"model"`
+	Stream bool   `json:"stream"`
+}
+
+type openAIResponsesBridgeRequest struct {
+	Model           string          `json:"model"`
+	Instructions    json.RawMessage `json:"instructions,omitempty"`
+	Input           json.RawMessage `json:"input"`
+	MaxOutputTokens int             `json:"max_output_tokens,omitempty"`
+	Temperature     *float64        `json:"temperature,omitempty"`
+	TopP            *float64        `json:"top_p,omitempty"`
+	Stream          bool            `json:"stream,omitempty"`
+}
+
 type stopSequenceFilter struct {
 	stops        []string
 	maxStopRunes int
 	pending      string
 	matched      string
 	done         bool
+}
+
+type openAIChatStreamOptions struct {
+	IncludeUsage bool `json:"include_usage,omitempty"`
+}
+
+type openAIChatUsage struct {
+	CompletionTokens        int            `json:"completion_tokens"`
+	TotalTokens             int            `json:"total_tokens"`
+	PromptTokens            int            `json:"prompt_tokens"`
+	PromptTokensDetails     map[string]any `json:"prompt_tokens_details,omitempty"`
+	CompletionTokensDetails map[string]any `json:"completion_tokens_details,omitempty"`
 }

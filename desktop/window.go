@@ -16,9 +16,7 @@ func runDesktop() error {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
-	app, err := proxyshared.NewApp(proxyshared.AppOptions{
-		DefaultControlListen: "127.0.0.1:0",
-	})
+	app, err := proxyshared.NewApp(desktopAppOptions())
 	if err != nil {
 		return err
 	}
@@ -56,6 +54,14 @@ func runDesktop() error {
 	w.Navigate(controlURL)
 	w.Run()
 	return nil
+}
+
+func desktopAppOptions() proxyshared.AppOptions {
+	return proxyshared.AppOptions{
+		DefaultControlListen: "127.0.0.1:0",
+		DefaultProxyBindHost: "0.0.0.0",
+		DefaultDisplayHost:   "127.0.0.1",
+	}
 }
 
 func desktopDataPath() string {

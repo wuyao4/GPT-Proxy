@@ -90,8 +90,137 @@ func TestClaudeMessagesProxy(t *testing.T) {
 	}
 }
 
+func TestProxyRuntimeRequestLogging(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"id":     "resp_log_1",
+			"object": "response",
+			"status": "completed",
+			"output": []map[string]any{{
+				"type": "message",
+				"role": "assistant",
+				"content": []map[string]any{{
+					"type": "output_text",
+					"text": "ok",
+				}},
+			}},
+		})
+	}))
+	defer upstream.Close()
+
+	logger := newLogHub(100)
+	srv := newServerWithLogger(Config{
+		ResponsesURL: upstream.URL,
+		Timeout:      5 * time.Second,
+	}, logger)
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{
+		"model":"gpt-5-codex",
+		"input":"hello",
+		"stream":false
+	}`))
+	request.Header.Set("Content-Type", "application/json")
+
+	srv.Routes().ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", recorder.Code, recorder.Body.String())
+	}
+
+	logs := strings.Join(logger.Snapshot(), "\n")
+	if !strings.Contains(logs, "[PROXY] request method=POST path=/v1/responses model=gpt-5-codex stream=false") {
+		t.Fatalf("missing request log: %s", logs)
+	}
+	if !strings.Contains(logs, `"input":"hello"`) {
+		t.Fatalf("missing request body in log: %s", logs)
+	}
+	if !strings.Contains(logs, "[PROXY] response path=") || !strings.Contains(logs, "upstream_status=200") {
+		t.Fatalf("missing response log: %s", logs)
+	}
+}
+
+func TestClaudeMessagesViaChatCompletionsProxy(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if r.Header.Get("Accept") != "text/event-stream" {
+			t.Fatalf("unexpected accept header: %q", r.Header.Get("Accept"))
+		}
+
+		var req map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if req["stream"] != true {
+			t.Fatalf("expected stream=true: %#v", req)
+		}
+		messages, ok := req["messages"].([]any)
+		if !ok || len(messages) != 2 {
+			t.Fatalf("unexpected messages: %#v", req["messages"])
+		}
+		first, ok := messages[0].(map[string]any)
+		if !ok || first["role"] != "system" || first["content"] != "you are helpful" {
+			t.Fatalf("unexpected system message: %#v", messages[0])
+		}
+		second, ok := messages[1].(map[string]any)
+		if !ok || second["role"] != "user" || second["content"] != "hi" {
+			t.Fatalf("unexpected user message: %#v", messages[1])
+		}
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(strings.Join([]string{
+			`data: {"id":"chatcmpl_claude_1","object":"chat.completion.chunk","created":1710000600,"model":"claude-compat","choices":[{"index":0,"delta":{"role":"assistant","content":"hello there"},"finish_reason":null}]}`,
+			``,
+			`data: {"id":"chatcmpl_claude_1","object":"chat.completion.chunk","created":1710000600,"model":"claude-compat","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"completion_tokens":2,"prompt_tokens":5,"total_tokens":7}}`,
+			``,
+			`data: [DONE]`,
+			``,
+		}, "\n")))
+	}))
+	defer upstream.Close()
+
+	srv := NewServer(Config{
+		ChatCompletionsURL: upstream.URL + "/v1/chat/completions",
+		UpstreamProtocol:   upstreamProtocolChatCompletions,
+		Timeout:            5 * time.Second,
+	})
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{
+		"model":"claude-compat",
+		"system":"you are helpful",
+		"messages":[{"role":"user","content":"hi"}],
+		"max_tokens":64
+	}`))
+	request.Header.Set("Content-Type", "application/json")
+
+	srv.Routes().ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", recorder.Code, recorder.Body.String())
+	}
+
+	var resp claudeMessagesResponse
+	if err := json.NewDecoder(recorder.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Type != "message" || resp.Role != "assistant" {
+		t.Fatalf("unexpected envelope: %#v", resp)
+	}
+	if len(resp.Content) != 1 || resp.Content[0].Text != "hello there" {
+		t.Fatalf("unexpected content: %#v", resp.Content)
+	}
+	if resp.StopReason != "end_turn" {
+		t.Fatalf("unexpected stop reason: %s", resp.StopReason)
+	}
+}
+
 func TestOpenAIChatCompletionsProxy(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("OpenAI-Beta") != "assistants=v2" {
+			t.Fatalf("missing forwarded header: %q", r.Header.Get("OpenAI-Beta"))
+		}
+
 		var req openAIResponsesRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Fatalf("decode request: %v", err)
@@ -131,6 +260,7 @@ func TestOpenAIChatCompletionsProxy(t *testing.T) {
 		"stop":" STOP"
 	}`))
 	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("OpenAI-Beta", "assistants=v2")
 
 	srv.Routes().ServeHTTP(recorder, request)
 
@@ -175,6 +305,62 @@ func TestClaudeMessagesStreamingProxy(t *testing.T) {
 	defer upstream.Close()
 
 	srv := NewServer(Config{ResponsesURL: upstream.URL, Timeout: 5 * time.Second})
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{
+		"model":"claude-compat",
+		"messages":[{"role":"user","content":"hi"}],
+		"max_tokens":16,
+		"stream":true
+	}`))
+	request.Header.Set("Content-Type", "application/json")
+
+	srv.Routes().ServeHTTP(recorder, request)
+
+	body := recorder.Body.String()
+	if !strings.Contains(body, "event: message_start") {
+		t.Fatalf("missing message_start: %s", body)
+	}
+	if !strings.Contains(body, `event: content_block_delta`) || !strings.Contains(body, `"text":"hel"`) || !strings.Contains(body, `"text":"lo"`) {
+		t.Fatalf("missing deltas: %s", body)
+	}
+	if !strings.Contains(body, `event: message_delta`) || !strings.Contains(body, `"stop_reason":"end_turn"`) {
+		t.Fatalf("missing message_delta: %s", body)
+	}
+	if !strings.Contains(body, `event: message_stop`) {
+		t.Fatalf("missing message_stop: %s", body)
+	}
+}
+
+func TestClaudeMessagesStreamingViaChatCompletionsProxy(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if r.Header.Get("Accept") != "text/event-stream" {
+			t.Fatalf("unexpected accept header: %q", r.Header.Get("Accept"))
+		}
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(strings.Join([]string{
+			`data: {"id":"chatcmpl_claude_stream_1","object":"chat.completion.chunk","created":1710000605,"model":"claude-compat","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":""}]}`,
+			``,
+			`data: {"id":"chatcmpl_claude_stream_1","object":"chat.completion.chunk","created":1710000605,"model":"claude-compat","choices":[{"index":0,"delta":{"content":"hel"},"finish_reason":""}]}`,
+			``,
+			`data: {"id":"chatcmpl_claude_stream_1","object":"chat.completion.chunk","created":1710000605,"model":"claude-compat","choices":[{"index":0,"delta":{"content":"lo"},"finish_reason":""}]}`,
+			``,
+			`data: {"id":"chatcmpl_claude_stream_1","object":"chat.completion.chunk","created":1710000605,"model":"claude-compat","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"completion_tokens":2,"prompt_tokens":5,"total_tokens":7}}`,
+			``,
+			`data: [DONE]`,
+			``,
+		}, "\n")))
+	}))
+	defer upstream.Close()
+
+	srv := NewServer(Config{
+		ChatCompletionsURL: upstream.URL + "/v1/chat/completions",
+		UpstreamProtocol:   upstreamProtocolChatCompletions,
+		Timeout:            5 * time.Second,
+	})
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{
 		"model":"claude-compat",
@@ -337,6 +523,253 @@ func TestOpenAIResponsesPassthrough(t *testing.T) {
 	}
 }
 
+func TestOpenAIResponsesViaChatCompletionsProxy(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if r.Header.Get("Accept") != "text/event-stream" {
+			t.Fatalf("unexpected accept header: %q", r.Header.Get("Accept"))
+		}
+		if r.Header.Get("OpenAI-Beta") != "assistants=v2" {
+			t.Fatalf("missing forwarded header: %q", r.Header.Get("OpenAI-Beta"))
+		}
+
+		var req map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode chat completions request: %v", err)
+		}
+		if req["model"] != "gpt-4.1-mini" {
+			t.Fatalf("unexpected model: %#v", req["model"])
+		}
+		if req["max_tokens"] != float64(32) {
+			t.Fatalf("unexpected max tokens: %#v", req["max_tokens"])
+		}
+		if req["stream"] != true {
+			t.Fatalf("expected stream=true: %#v", req)
+		}
+		streamOptions, ok := req["stream_options"].(map[string]any)
+		if !ok || streamOptions["include_usage"] != true {
+			t.Fatalf("unexpected stream_options: %#v", req["stream_options"])
+		}
+		if req["temperature"] != 0.3 {
+			t.Fatalf("unexpected temperature: %#v", req["temperature"])
+		}
+		if req["top_p"] != 0.9 {
+			t.Fatalf("unexpected top_p: %#v", req["top_p"])
+		}
+		messages, ok := req["messages"].([]any)
+		if !ok || len(messages) != 2 {
+			t.Fatalf("unexpected message count: %#v", req["messages"])
+		}
+		first, ok := messages[0].(map[string]any)
+		if !ok || first["role"] != "system" || first["content"] != "be concise" {
+			t.Fatalf("unexpected system message: %#v", messages[0])
+		}
+		second, ok := messages[1].(map[string]any)
+		if !ok || second["role"] != "user" || second["content"] != "say hi" {
+			t.Fatalf("unexpected user message: %#v", messages[1])
+		}
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(strings.Join([]string{
+			`data: {"id":"chatcmpl_bridge_1","object":"chat.completion.chunk","created":1710000400,"model":"gpt-4.1-mini","choices":[{"index":0,"delta":{"role":"assistant","content":"hello from bridge"},"finish_reason":null}]}`,
+			``,
+			`data: {"id":"chatcmpl_bridge_1","object":"chat.completion.chunk","created":1710000400,"model":"gpt-4.1-mini","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"completion_tokens":3,"prompt_tokens":4,"total_tokens":7}}`,
+			``,
+			`data: [DONE]`,
+			``,
+		}, "\n")))
+	}))
+	defer upstream.Close()
+
+	srv := NewServer(Config{
+		ChatCompletionsURL: upstream.URL + "/v1/chat/completions",
+		UpstreamProtocol:   upstreamProtocolChatCompletions,
+		Timeout:            5 * time.Second,
+	})
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{
+		"model":"gpt-4.1-mini",
+		"instructions":"be concise",
+		"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"say hi"}]}],
+		"max_output_tokens":32,
+		"temperature":0.3,
+		"top_p":0.9
+	}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("OpenAI-Beta", "assistants=v2")
+
+	srv.Routes().ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", recorder.Code, recorder.Body.String())
+	}
+
+	var resp openAIResponsesResponse
+	if err := json.NewDecoder(recorder.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Object != "response" {
+		t.Fatalf("unexpected object: %#v", resp)
+	}
+	if resp.Status != "completed" {
+		t.Fatalf("unexpected status: %#v", resp)
+	}
+	if len(resp.Output) != 1 || len(resp.Output[0].Content) != 1 || resp.Output[0].Content[0].Text != "hello from bridge" {
+		t.Fatalf("unexpected output: %#v", resp)
+	}
+	if resp.Usage == nil || resp.Usage.OutputTokens != 3 || resp.Usage.InputTokens != 4 {
+		t.Fatalf("unexpected usage: %#v", resp.Usage)
+	}
+}
+
+func TestOpenAIChatCompletionsViaStreamingUpstreamAggregates(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if r.Header.Get("Accept") != "text/event-stream" {
+			t.Fatalf("unexpected accept header: %q", r.Header.Get("Accept"))
+		}
+
+		var req map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode chat completions request: %v", err)
+		}
+		if req["stream"] != true {
+			t.Fatalf("expected stream=true: %#v", req)
+		}
+		streamOptions, ok := req["stream_options"].(map[string]any)
+		if !ok || streamOptions["include_usage"] != true {
+			t.Fatalf("unexpected stream_options: %#v", req["stream_options"])
+		}
+		if req["verbosity"] != "medium" {
+			t.Fatalf("missing passthrough verbosity: %#v", req["verbosity"])
+		}
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(strings.Join([]string{
+			`data: {"id":"chatcmpl_passthrough_1","object":"chat.completion.chunk","created":1710000450,"model":"gpt-5.4","choices":[{"index":0,"delta":{"role":"assistant","content":"在"},"finish_reason":null}]}`,
+			``,
+			`data: {"id":"chatcmpl_passthrough_1","object":"chat.completion.chunk","created":1710000450,"model":"gpt-5.4","choices":[{"index":0,"delta":{"content":"呢"},"finish_reason":null}]}`,
+			``,
+			`data: {"id":"chatcmpl_passthrough_1","object":"chat.completion.chunk","created":1710000450,"model":"gpt-5.4","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"completion_tokens":2,"prompt_tokens":5,"total_tokens":7}}`,
+			``,
+			`data: [DONE]`,
+			``,
+		}, "\n")))
+	}))
+	defer upstream.Close()
+
+	srv := NewServer(Config{
+		ChatCompletionsURL: upstream.URL + "/v1/chat/completions",
+		UpstreamProtocol:   upstreamProtocolChatCompletions,
+		Timeout:            5 * time.Second,
+	})
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{
+		"model":"gpt-5.4",
+		"verbosity":"medium",
+		"messages":[{"role":"user","content":"hello"}]
+	}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Accept", "application/json")
+
+	srv.Routes().ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if got := recorder.Header().Get("Content-Type"); !strings.HasPrefix(got, "application/json") {
+		t.Fatalf("unexpected content type: %q", got)
+	}
+
+	var resp openAIChatCompletionsResponse
+	if err := json.NewDecoder(recorder.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Object != "chat.completion" {
+		t.Fatalf("unexpected object: %#v", resp)
+	}
+	if len(resp.Choices) != 1 || resp.Choices[0].Message.Content != "在呢" {
+		t.Fatalf("unexpected choices: %#v", resp)
+	}
+	if resp.Usage == nil || resp.Usage.CompletionTokens != 2 || resp.Usage.PromptTokens != 5 {
+		t.Fatalf("unexpected usage: %#v", resp.Usage)
+	}
+}
+
+func TestOpenAIResponsesStreamingViaChatCompletionsProxy(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if r.Header.Get("Accept") != "text/event-stream" {
+			t.Fatalf("unexpected accept header: %q", r.Header.Get("Accept"))
+		}
+
+		var req openAIChatCompletionsRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode chat completions request: %v", err)
+		}
+		if len(req.Messages) != 1 || req.Messages[0].Role != "user" || req.Messages[0].Content != "say hi" {
+			t.Fatalf("unexpected prompt: %#v", req.Messages)
+		}
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(strings.Join([]string{
+			`data: {"id":"chatcmpl_stream_bridge","object":"chat.completion.chunk","created":1710000500,"model":"gpt-4.1-mini","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":""}]}`,
+			``,
+			`data: {"id":"chatcmpl_stream_bridge","object":"chat.completion.chunk","created":1710000500,"model":"gpt-4.1-mini","choices":[{"index":0,"delta":{"content":"hel"},"finish_reason":""}]}`,
+			``,
+			`data: {"id":"chatcmpl_stream_bridge","object":"chat.completion.chunk","created":1710000500,"model":"gpt-4.1-mini","choices":[{"index":0,"delta":{"content":"lo"},"finish_reason":""}]}`,
+			``,
+			`data: {"id":"chatcmpl_stream_bridge","object":"chat.completion.chunk","created":1710000500,"model":"gpt-4.1-mini","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+			``,
+			`data: [DONE]`,
+			``,
+		}, "\n")))
+	}))
+	defer upstream.Close()
+
+	srv := NewServer(Config{
+		ChatCompletionsURL: upstream.URL + "/v1/chat/completions",
+		UpstreamProtocol:   upstreamProtocolChatCompletions,
+		Timeout:            5 * time.Second,
+	})
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{
+		"model":"gpt-4.1-mini",
+		"input":"say hi",
+		"stream":true
+	}`))
+	request.Header.Set("Content-Type", "application/json")
+
+	srv.Routes().ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if got := recorder.Header().Get("Content-Type"); !strings.HasPrefix(got, "text/event-stream") {
+		t.Fatalf("unexpected content type: %q", got)
+	}
+
+	body := recorder.Body.String()
+	if !strings.Contains(body, `event: response.created`) {
+		t.Fatalf("missing response.created: %s", body)
+	}
+	if !strings.Contains(body, `event: response.output_text.delta`) || !strings.Contains(body, `"delta":"hel"`) || !strings.Contains(body, `"delta":"lo"`) {
+		t.Fatalf("missing output_text deltas: %s", body)
+	}
+	if !strings.Contains(body, `event: response.completed`) {
+		t.Fatalf("missing response.completed: %s", body)
+	}
+	if !strings.Contains(body, `data: [DONE]`) {
+		t.Fatalf("missing done marker: %s", body)
+	}
+}
+
 func TestOpenAIResponsesStreamingPassthrough(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Accept") != "text/event-stream" {
@@ -421,6 +854,36 @@ func TestOpenAIModelsPassthrough(t *testing.T) {
 	}
 	if resp["object"] != "list" {
 		t.Fatalf("unexpected response: %#v", resp)
+	}
+}
+
+func TestSetUpstreamAuthorizationPrefersConfiguredKey(t *testing.T) {
+	dst := http.Header{}
+	src := http.Header{}
+	src.Set("Authorization", "Bearer client-placeholder")
+
+	source := setUpstreamAuthorization(dst, src, "real-upstream-key")
+
+	if source != "configured" {
+		t.Fatalf("unexpected source: %s", source)
+	}
+	if got := dst.Get("Authorization"); got != "Bearer real-upstream-key" {
+		t.Fatalf("unexpected authorization header: %q", got)
+	}
+}
+
+func TestSetUpstreamAuthorizationFallsBackToPassthrough(t *testing.T) {
+	dst := http.Header{}
+	src := http.Header{}
+	src.Set("Authorization", "Bearer client-placeholder")
+
+	source := setUpstreamAuthorization(dst, src, "")
+
+	if source != "passthrough" {
+		t.Fatalf("unexpected source: %s", source)
+	}
+	if got := dst.Get("Authorization"); got != "Bearer client-placeholder" {
+		t.Fatalf("unexpected authorization header: %q", got)
 	}
 }
 

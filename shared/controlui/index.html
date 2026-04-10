@@ -381,19 +381,27 @@
             <div>
               <label for="hostMode">Host Mode</label>
               <select id="hostMode">
-                <option value="default">Default mode, append /v1/responses</option>
+                <option value="default">Default mode, derive the standard OpenAI path</option>
                 <option value="custom">Custom mode, use the exact URL</option>
               </select>
             </div>
             <div>
-              <label for="port">Proxy Port</label>
-              <input id="port" type="number" min="1" max="65535" placeholder="Leave empty for a random port" />
+              <label for="protocol">Upstream Protocol</label>
+              <select id="protocol">
+                <option value="responses">Responses</option>
+                <option value="chat_completions">Chat Completions</option>
+              </select>
             </div>
           </div>
 
           <div>
             <label for="host">OpenAI Host</label>
             <input id="host" type="text" placeholder="https://api.openai.com" value="https://api.openai.com" />
+          </div>
+
+          <div>
+            <label for="port">Proxy Port</label>
+            <input id="port" type="number" min="1" max="65535" placeholder="Leave empty for a random port" />
           </div>
 
           <div class="two-col">
@@ -405,6 +413,11 @@
               <label for="model">Test Model</label>
               <input id="model" type="text" placeholder="gpt-5.4" value="gpt-5.4" />
             </div>
+          </div>
+
+          <div>
+            <label for="testMessage">Test Message</label>
+            <input id="testMessage" type="text" placeholder="hello" value="hello" />
           </div>
 
           <div class="state">
@@ -437,7 +450,7 @@
             <div class="metric-value" id="proxyPort">--</div>
           </div>
           <div class="metric">
-            <div class="metric-label">Upstream Responses</div>
+            <div class="metric-label">Upstream Target</div>
             <div class="metric-value" id="upstreamUrl">--</div>
           </div>
           <div class="metric">
@@ -466,9 +479,11 @@
     };
 
     const hostModeInput = document.getElementById("hostMode");
+    const protocolInput = document.getElementById("protocol");
     const hostInput = document.getElementById("host");
     const keyInput = document.getElementById("key");
     const modelInput = document.getElementById("model");
+    const testMessageInput = document.getElementById("testMessage");
     const portInput = document.getElementById("port");
     const testBtn = document.getElementById("testBtn");
     const startBtn = document.getElementById("startBtn");
@@ -513,6 +528,37 @@
       logWindow.scrollTop = logWindow.scrollHeight;
     }
 
+    function prettyBlock(value) {
+      if (value == null || value === "") {
+        return "";
+      }
+      if (typeof value === "string") {
+        return value;
+      }
+      try {
+        return JSON.stringify(value, null, 2);
+      } catch (_) {
+        return String(value);
+      }
+    }
+
+    function appendTestLog(result) {
+      const lines = [
+        `[TEST] protocol=${result.upstream_protocol} target=${result.upstream_target}`,
+        `[TEST] model=${result.model} message=${JSON.stringify(result.test_message || "")}`,
+        `[TEST] status=${result.status_code} ok=${Boolean(result.ok)}`
+      ];
+
+      if (result.request_payload) {
+        lines.push("[TEST] request:");
+        lines.push(prettyBlock(result.request_payload));
+      }
+
+      lines.push("[TEST] response:");
+      lines.push(prettyBlock(result.response_json || result.response_body || "(empty)"));
+      appendLog(lines.join("\n"));
+    }
+
     function renderRoutes(routeList) {
       routes.innerHTML = "";
       if (!routeList || routeList.length === 0) {
@@ -539,11 +585,20 @@
       controlUrl.textContent = `CONTROL // ${status.control_url || location.origin}`;
       proxyBase.textContent = status.proxy_base_url || "--";
       proxyPort.textContent = status.proxy_port || "--";
-      upstreamUrl.textContent = status.upstream_responses_url || "--";
+      upstreamUrl.textContent = status.upstream_target_url || status.upstream_responses_url || "--";
       startedAt.textContent = status.started_at || "--";
       renderRoutes(status.routes || []);
       setState(status.running ? "Proxy is running" : "Proxy is stopped", status.running);
       syncButtons();
+    }
+
+    function updateHintText() {
+      const protocolPath = protocolInput.value === "chat_completions"
+        ? "/v1/chat/completions"
+        : "/v1/responses";
+      hintText.textContent = hostModeInput.value === "custom"
+        ? `Custom mode forwards the exact URL you enter as the upstream ${protocolInput.value === "chat_completions" ? "chat completions" : "responses"} target.`
+        : `Default mode normalizes the host first and appends the standard OpenAI path ${protocolPath}.`;
     }
 
     async function fetchJSON(url, options) {
@@ -578,19 +633,39 @@
       setState("Testing upstream connection", false);
 
       try {
-        const result = await fetchJSON("/api/test-connection", {
+        const response = await fetch("/api/test-connection", {
           method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
           body: JSON.stringify({
             host: hostInput.value.trim(),
             key: keyInput.value.trim(),
             model: modelInput.value.trim(),
-            host_mode: hostModeInput.value
+            host_mode: hostModeInput.value,
+            protocol: protocolInput.value,
+            test_message: testMessageInput.value.trim()
           })
         });
 
-        state.tested = true;
-        hintText.textContent = `Connection test passed. Responses target: ${result.responses_proxy_target}`;
-        setState("Connection test passed", false);
+        let result = {};
+        try {
+          result = await response.json();
+        } catch (_) {}
+
+        if (!response.ok) {
+          const message = result.error || `Request failed: ${response.status}`;
+          appendLog(`[TEST] request failed before upstream\n${message}`);
+          throw new Error(message);
+        }
+
+        appendTestLog(result);
+        state.tested = Boolean(result.ok);
+        hintText.textContent = `Last test target: ${result.upstream_target || result.responses_proxy_target}`;
+        setState(result.ok ? "Connection test passed" : "Connection test failed", false);
+        if (!result.ok) {
+          setError(`Upstream returned status ${result.status_code}`);
+        }
       } catch (error) {
         state.tested = false;
         setError(error.message);
@@ -615,7 +690,8 @@
             host: hostInput.value.trim(),
             key: keyInput.value.trim(),
             port,
-            host_mode: hostModeInput.value
+            host_mode: hostModeInput.value,
+            protocol: protocolInput.value
           })
         });
         renderStatus(status);
@@ -679,13 +755,17 @@
 
     hostModeInput.addEventListener("change", () => {
       invalidateConnectionTest();
-      hintText.textContent = hostModeInput.value === "custom"
-        ? "Custom mode forwards the exact host value as the final responses URL."
-        : "Default mode normalizes the host first and appends the standard OpenAI responses path.";
+      updateHintText();
       setError("");
     });
 
-    [hostInput, keyInput, modelInput].forEach((element) => {
+    protocolInput.addEventListener("change", () => {
+      invalidateConnectionTest();
+      updateHintText();
+      setError("");
+    });
+
+    [hostInput, keyInput, modelInput, testMessageInput].forEach((element) => {
       element.addEventListener("input", () => {
         invalidateConnectionTest();
         setError("");
@@ -709,6 +789,7 @@
     startBtn.addEventListener("click", startProxy);
     stopBtn.addEventListener("click", stopProxy);
 
+    updateHintText();
     syncButtons();
     attachLogs();
     loadStatus().catch((error) => {
