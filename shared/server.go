@@ -202,33 +202,6 @@ func (s *Server) handleClaudeMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// ========== 🔍 调试日志 ==========
-	s.logf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-	s.logf("📥 [CLAUDE MESSAGES] 收到请求")
-	s.logf("   Model: %s", req.Model)
-	s.logf("   Stream: %t", req.Stream)
-	s.logf("   消息数量: %d", len(req.Messages))
-	s.logf("")
-	s.logf("   消息详情:")
-	for i, msg := range req.Messages {
-		contentStr := string(msg.Content)
-		if len(contentStr) > 200 {
-			contentStr = contentStr[:200] + "..."
-		}
-		s.logf("   [%d] role=%s", i, msg.Role)
-		s.logf("       content=%s", contentStr)
-	}
-	if len(req.System) > 0 {
-		systemStr := string(req.System)
-		if len(systemStr) > 100 {
-			systemStr = systemStr[:100] + "..."
-		}
-		s.logf("")
-		s.logf("   System Prompt: %s", systemStr)
-	}
-	s.logf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-	// ===================================
-
 	input, err := claudeMessagesToResponsesInput(req.System, req.Messages)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -673,7 +646,9 @@ func proxyUpstreamResponse(w http.ResponseWriter, resp *http.Response) error {
 
 	flusher, canFlush := w.(http.Flusher)
 	contentType := strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Type")))
-	if canFlush && strings.HasPrefix(contentType, "text/event-stream") {
+	isStream := strings.HasPrefix(contentType, "text/event-stream") ||
+		strings.Contains(contentType, "stream")
+	if canFlush && isStream {
 		buf := make([]byte, 4096)
 		for {
 			n, err := resp.Body.Read(buf)

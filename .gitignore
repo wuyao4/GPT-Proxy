@@ -38,3 +38,4 @@ desktop/dist/
 
 # CLI temp outputs
 cli/bin/
+.claude

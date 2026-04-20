@@ -37,8 +37,10 @@ Most modern Windows installs already include WebView2 Runtime. If the desktop ap
 From `desktop/`:
 
 ```powershell
-go build -buildvcs=false -o gpt-proxy-desktop.exe .
+go build -ldflags "-H windowsgui" -o gpt-proxy-desktop.exe .
 ```
+
+The `-H windowsgui` flag suppresses the black console window on startup. Errors are shown via a Windows message box instead of stderr.
 
 ## Test
 

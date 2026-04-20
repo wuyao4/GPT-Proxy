@@ -110,7 +110,7 @@ go build -o gpt-proxy-cli.exe .
 
 ```powershell
 cd desktop
-go build -buildvcs=false -o gpt-proxy-desktop.exe .
+go build -ldflags "-H windowsgui" -o gpt-proxy-desktop.exe .
 ```
 
 ## Test
