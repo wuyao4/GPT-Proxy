@@ -59,6 +59,10 @@ func LoadConfig() (Config, error) {
 	if chatCompletionsURL == "" && strings.HasSuffix(responsesURL, "/v1/responses") {
 		chatCompletionsURL = strings.TrimSuffix(responsesURL, "/v1/responses") + "/v1/chat/completions"
 	}
+	messagesURL := strings.TrimSpace(os.Getenv("ANTHROPIC_MESSAGES_URL"))
+	if messagesURL == "" && strings.HasSuffix(responsesURL, "/v1/responses") {
+		messagesURL = strings.TrimSuffix(responsesURL, "/v1/responses") + "/v1/messages"
+	}
 	modelsURL := strings.TrimSpace(os.Getenv("OPENAI_MODELS_URL"))
 	if modelsURL == "" && strings.HasSuffix(responsesURL, "/v1/responses") {
 		modelsURL = strings.TrimSuffix(responsesURL, "/v1/responses") + "/v1/models"
@@ -78,6 +82,7 @@ func LoadConfig() (Config, error) {
 		ModelsURL:          modelsURL,
 		ResponsesURL:       responsesURL,
 		ChatCompletionsURL: chatCompletionsURL,
+		MessagesURL:        messagesURL,
 		UpstreamProtocol:   upstreamProtocol,
 		APIKey:             strings.TrimSpace(os.Getenv("OPENAI_API_KEY")),
 		Timeout:            timeout,
@@ -100,6 +105,16 @@ func (s *Server) chatCompletionsURL() string {
 		return strings.TrimSuffix(strings.TrimSpace(s.cfg.ResponsesURL), "/v1/responses") + "/v1/chat/completions"
 	}
 	return strings.TrimSpace(s.cfg.ChatCompletionsURL)
+}
+
+func (s *Server) messagesURL() string {
+	if trimmed := strings.TrimSpace(s.cfg.MessagesURL); trimmed != "" {
+		return trimmed
+	}
+	if strings.HasSuffix(strings.TrimSpace(s.cfg.ResponsesURL), "/v1/responses") {
+		return strings.TrimSuffix(strings.TrimSpace(s.cfg.ResponsesURL), "/v1/responses") + "/v1/messages"
+	}
+	return ""
 }
 
 func (s *Server) handleOpenAIModels(w http.ResponseWriter, r *http.Request) {
@@ -149,6 +164,11 @@ func (s *Server) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) {
 
 	if s.upstreamProtocol() == upstreamProtocolChatCompletions {
 		s.handleOpenAIResponsesViaChatCompletions(w, r, body)
+		return
+	}
+
+	if s.upstreamProtocol() == upstreamProtocolMessages {
+		s.handleOpenAIResponsesViaMessages(w, r, body)
 		return
 	}
 
@@ -268,6 +288,11 @@ func (s *Server) handleClaudeMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if s.upstreamProtocol() == upstreamProtocolMessages {
+		s.handleClaudeMessagesPassthrough(w, r, req)
+		return
+	}
+
 	if req.Stream {
 		s.logf("streaming Claude Messages request model=%s", req.Model)
 		_ = s.streamClaudeMessages(w, r, responsesReq, req.Model, req.StopSequences)
@@ -304,6 +329,11 @@ func (s *Server) handleOpenAIChatCompletions(w http.ResponseWriter, r *http.Requ
 
 	if s.upstreamProtocol() == upstreamProtocolChatCompletions {
 		s.handleOpenAIChatCompletionsPassthrough(w, r)
+		return
+	}
+
+	if s.upstreamProtocol() == upstreamProtocolMessages {
+		s.handleOpenAIChatCompletionsViaMessages(w, r)
 		return
 	}
 
@@ -817,4 +847,392 @@ func (s *Server) logf(format string, args ...any) {
 		return
 	}
 	s.logger.Printf(format, args...)
+}
+
+// handleClaudeMessagesPassthrough forwards /v1/messages directly to an upstream Claude-compatible /v1/messages endpoint.
+func (s *Server) handleClaudeMessagesPassthrough(w http.ResponseWriter, r *http.Request, req claudeMessagesRequest) {
+	targetURL := s.messagesURL()
+	if targetURL == "" {
+		writeError(w, http.StatusInternalServerError, "messages upstream is not configured")
+		return
+	}
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("marshal request: %v", err))
+		return
+	}
+
+	s.logf("forward upstream url=%s model=%s stream=%t (messages passthrough)", targetURL, req.Model, req.Stream)
+
+	accept := "application/json"
+	if req.Stream {
+		accept = "text/event-stream"
+	}
+
+	upstream, err := s.forwardRawRequest(r, http.MethodPost, targetURL, body, accept)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	defer upstream.Body.Close()
+
+	if err := proxyUpstreamResponse(w, upstream); err != nil {
+		s.logf("proxy messages passthrough failed: %v", err)
+	}
+}
+
+// handleOpenAIResponsesViaMessages converts a Responses request to Claude Messages format and forwards upstream.
+func (s *Server) handleOpenAIResponsesViaMessages(w http.ResponseWriter, r *http.Request, body []byte) {
+	var req openAIResponsesBridgeRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid json: %v", err))
+		return
+	}
+
+	claudeReq, err := responsesRequestToClaudeMessages(req)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	clientStream := claudeReq.Stream
+
+	if clientStream {
+		s.logf("streaming OpenAI Responses request via messages model=%s", claudeReq.Model)
+		_ = s.streamOpenAIResponsesViaMessages(w, r, claudeReq)
+		return
+	}
+
+	claudeResp, statusCode, err := s.forwardMessages(r, claudeReq)
+	if err != nil {
+		writeError(w, statusCode, err.Error())
+		return
+	}
+
+	text := claudeMessagesResponseToText(claudeResp)
+	writeJSON(w, http.StatusOK, claudeMessagesToResponsesResponse(claudeResp, text))
+	s.logf("completed OpenAI Responses request via messages model=%s", claudeReq.Model)
+}
+
+// handleOpenAIChatCompletionsViaMessages converts a Chat Completions request to Claude Messages and forwards upstream.
+func (s *Server) handleOpenAIChatCompletionsViaMessages(w http.ResponseWriter, r *http.Request) {
+	var req openAIChatCompletionsRequest
+	if err := decodeJSON(r.Body, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	if strings.TrimSpace(req.Model) == "" {
+		writeError(w, http.StatusBadRequest, "model is required")
+		return
+	}
+
+	stopSequences, err := parseStopSequences(req.Stop)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	claudeReq := chatCompletionsToClaudeMessages(req)
+
+	if req.Stream {
+		s.logf("streaming OpenAI Chat Completions request via messages model=%s", req.Model)
+		_ = s.streamOpenAIChatCompletionsViaMessages(w, r, claudeReq, req.Model, stopSequences)
+		return
+	}
+
+	claudeResp, statusCode, err := s.forwardMessages(r, claudeReq)
+	if err != nil {
+		writeError(w, statusCode, err.Error())
+		return
+	}
+
+	text, matchedStop := applyStopSequences(claudeMessagesResponseToText(claudeResp), stopSequences)
+	writeJSON(w, http.StatusOK, openAIChatCompletionsResponse{
+		ID:      claudeResp.ID,
+		Object:  "chat.completion",
+		Created: time.Now().Unix(),
+		Model:   coalesce(claudeResp.Model, req.Model),
+		Choices: []openAIChatCompletionChoice{{
+			Index: 0,
+			Message: openAIChatOutputMessage{
+				Role:    "assistant",
+				Content: text,
+			},
+			FinishReason: claudeStopReasonToCompletionFinishReason(claudeResp.StopReason, matchedStop),
+		}},
+		Usage: claudeUsageToChatUsage(claudeResp.Usage),
+	})
+	s.logf("completed OpenAI Chat Completions request via messages model=%s", req.Model)
+}
+
+func (s *Server) forwardMessages(incoming *http.Request, payload claudeMessagesRequest) (claudeMessagesResponse, int, error) {
+	targetURL := s.messagesURL()
+	if targetURL == "" {
+		return claudeMessagesResponse{}, http.StatusInternalServerError, errors.New("messages upstream is not configured")
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return claudeMessagesResponse{}, http.StatusInternalServerError, fmt.Errorf("marshal upstream request: %w", err)
+	}
+
+	s.logf("forward upstream url=%s model=%s stream=false", targetURL, payload.Model)
+
+	req, err := http.NewRequestWithContext(incoming.Context(), http.MethodPost, targetURL, bytes.NewReader(body))
+	if err != nil {
+		return claudeMessagesResponse{}, http.StatusInternalServerError, fmt.Errorf("build upstream request: %w", err)
+	}
+
+	copyForwardHeaders(req.Header, incoming.Header)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("anthropic-version", "2023-06-01")
+
+	authSource := setUpstreamAuthorization(req.Header, incoming.Header, s.cfg.APIKey)
+	if key := strings.TrimSpace(s.cfg.APIKey); key != "" {
+		req.Header.Set("x-api-key", key)
+	} else if auth := strings.TrimSpace(incoming.Header.Get("x-api-key")); auth != "" {
+		req.Header.Set("x-api-key", auth)
+	}
+	s.logUpstreamRequest(http.MethodPost, targetURL, payload.Model, false, body)
+	s.logf("upstream auth=%s", authSource)
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return claudeMessagesResponse{}, http.StatusBadGateway, fmt.Errorf("request upstream messages failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	s.logUpstreamResponse(targetURL, resp.StatusCode, resp.Header.Get("Content-Type"))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		raw, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		if readErr != nil {
+			return claudeMessagesResponse{}, http.StatusBadGateway, fmt.Errorf("upstream status %d and failed to read body: %w", resp.StatusCode, readErr)
+		}
+		return claudeMessagesResponse{}, resp.StatusCode, fmt.Errorf("upstream status %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
+	}
+
+	var decoded claudeMessagesResponse
+	if err := decodeJSON(resp.Body, &decoded); err != nil {
+		return claudeMessagesResponse{}, http.StatusBadGateway, fmt.Errorf("decode upstream response: %w", err)
+	}
+	return decoded, http.StatusOK, nil
+}
+
+func (s *Server) forwardMessagesStream(incoming *http.Request, payload claudeMessagesRequest) (*http.Response, int, error) {
+	targetURL := s.messagesURL()
+	if targetURL == "" {
+		return nil, http.StatusInternalServerError, errors.New("messages upstream is not configured")
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, http.StatusInternalServerError, fmt.Errorf("marshal upstream request: %w", err)
+	}
+
+	s.logf("forward upstream url=%s model=%s stream=true", targetURL, payload.Model)
+
+	req, err := http.NewRequestWithContext(incoming.Context(), http.MethodPost, targetURL, bytes.NewReader(body))
+	if err != nil {
+		return nil, http.StatusInternalServerError, fmt.Errorf("build upstream request: %w", err)
+	}
+
+	copyForwardHeaders(req.Header, incoming.Header)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
+	req.Header.Set("anthropic-version", "2023-06-01")
+
+	authSource := setUpstreamAuthorization(req.Header, incoming.Header, s.cfg.APIKey)
+	if key := strings.TrimSpace(s.cfg.APIKey); key != "" {
+		req.Header.Set("x-api-key", key)
+	} else if auth := strings.TrimSpace(incoming.Header.Get("x-api-key")); auth != "" {
+		req.Header.Set("x-api-key", auth)
+	}
+	s.logUpstreamRequest(http.MethodPost, targetURL, payload.Model, true, body)
+	s.logf("upstream auth=%s", authSource)
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return nil, http.StatusBadGateway, fmt.Errorf("request upstream messages failed: %w", err)
+	}
+
+	s.logUpstreamResponse(targetURL, resp.StatusCode, resp.Header.Get("Content-Type"))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		defer resp.Body.Close()
+		raw, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		if readErr != nil {
+			return nil, http.StatusBadGateway, fmt.Errorf("upstream status %d and failed to read body: %w", resp.StatusCode, readErr)
+		}
+		return nil, resp.StatusCode, fmt.Errorf("upstream status %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
+	}
+
+	return resp, http.StatusOK, nil
+}
+
+// responsesRequestToClaudeMessages converts an OpenAI Responses request to Claude Messages format.
+func responsesRequestToClaudeMessages(req openAIResponsesBridgeRequest) (claudeMessagesRequest, error) {
+	if strings.TrimSpace(req.Model) == "" {
+		return claudeMessagesRequest{}, errors.New("model is required")
+	}
+
+	messages, systemFromInput, err := responsesInputToClaudeMessages(req.Input)
+	if err != nil {
+		return claudeMessagesRequest{}, err
+	}
+
+	var system json.RawMessage
+	if len(bytes.TrimSpace(req.Instructions)) > 0 && string(bytes.TrimSpace(req.Instructions)) != "null" {
+		system = req.Instructions
+	} else if len(systemFromInput) > 0 {
+		system = systemFromInput
+	}
+
+	return claudeMessagesRequest{
+		Model:       strings.TrimSpace(req.Model),
+		Messages:    messages,
+		System:      system,
+		MaxTokens:   req.MaxOutputTokens,
+		Temperature: req.Temperature,
+		TopP:        req.TopP,
+		Stream:      req.Stream,
+	}, nil
+}
+
+func responsesInputToClaudeMessages(raw json.RawMessage) ([]claudeInputMessage, json.RawMessage, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || string(trimmed) == "null" {
+		return nil, nil, errors.New("input is required")
+	}
+
+	var text string
+	if err := json.Unmarshal(trimmed, &text); err == nil {
+		content, _ := json.Marshal(text)
+		return []claudeInputMessage{{Role: "user", Content: json.RawMessage(content)}}, nil, nil
+	}
+
+	var msgs []responsesInputMessage
+	if err := json.Unmarshal(trimmed, &msgs); err != nil {
+		return nil, nil, errors.New("input must be a string or array of message objects")
+	}
+
+	out := make([]claudeInputMessage, 0, len(msgs))
+	var systemRaw json.RawMessage
+	for idx, m := range msgs {
+		if strings.TrimSpace(m.Role) == "" {
+			return nil, nil, fmt.Errorf("input[%d] role is required", idx)
+		}
+		content, err := responsesMessageContentToString(m.Content)
+		if err != nil {
+			return nil, nil, fmt.Errorf("input[%d]: %w", idx, err)
+		}
+		if m.Role == "system" {
+			systemRaw, _ = json.Marshal(content)
+			continue
+		}
+		contentRaw, _ := json.Marshal(content)
+		out = append(out, claudeInputMessage{Role: m.Role, Content: json.RawMessage(contentRaw)})
+	}
+	if len(out) == 0 {
+		return nil, nil, errors.New("input must contain at least one non-system message")
+	}
+	return out, systemRaw, nil
+}
+
+// chatCompletionsToClaudeMessages converts an OpenAI Chat Completions request to Claude Messages format.
+func chatCompletionsToClaudeMessages(req openAIChatCompletionsRequest) claudeMessagesRequest {
+	var system json.RawMessage
+	messages := make([]claudeInputMessage, 0, len(req.Messages))
+	for _, m := range req.Messages {
+		if m.Role == "system" {
+			system, _ = json.Marshal(m.Content)
+			continue
+		}
+		content, _ := json.Marshal(m.Content)
+		messages = append(messages, claudeInputMessage{Role: m.Role, Content: json.RawMessage(content)})
+	}
+	return claudeMessagesRequest{
+		Model:       req.Model,
+		Messages:    messages,
+		System:      system,
+		MaxTokens:   req.MaxTokens,
+		Temperature: req.Temperature,
+		TopP:        req.TopP,
+		Stream:      req.Stream,
+	}
+}
+
+func claudeMessagesResponseToText(resp claudeMessagesResponse) string {
+	var b strings.Builder
+	for _, block := range resp.Content {
+		if block.Type == "text" {
+			b.WriteString(block.Text)
+		}
+	}
+	return b.String()
+}
+
+func claudeMessagesToResponsesResponse(resp claudeMessagesResponse, text string) openAIResponsesResponse {
+	status := "completed"
+	var incomplete *openAIIncompleteDetail
+	if resp.StopReason == "max_tokens" {
+		status = "incomplete"
+		incomplete = &openAIIncompleteDetail{Reason: "max_output_tokens"}
+	}
+
+	output := []openAIResponseOutput{}
+	if text != "" {
+		output = []openAIResponseOutput{{
+			Type: "message",
+			Role: "assistant",
+			Content: []openAIResponseContent{{
+				Type: "output_text",
+				Text: text,
+			}},
+		}}
+	}
+
+	return openAIResponsesResponse{
+		Object:            "response",
+		ID:                resp.ID,
+		Model:             resp.Model,
+		CreatedAt:         time.Now().Unix(),
+		Status:            status,
+		Output:            output,
+		IncompleteDetails: incomplete,
+		Usage:             claudeUsageToResponsesUsage(resp.Usage),
+	}
+}
+
+func claudeUsageToResponsesUsage(usage *claudeMessageUsage) *openAIUsage {
+	if usage == nil {
+		return nil
+	}
+	return &openAIUsage{
+		InputTokens:  usage.InputTokens,
+		OutputTokens: usage.OutputTokens,
+		TotalTokens:  usage.InputTokens + usage.OutputTokens,
+	}
+}
+
+func claudeUsageToChatUsage(usage *claudeMessageUsage) *openAIChatUsage {
+	if usage == nil {
+		return nil
+	}
+	return &openAIChatUsage{
+		PromptTokens:     usage.InputTokens,
+		CompletionTokens: usage.OutputTokens,
+		TotalTokens:      usage.InputTokens + usage.OutputTokens,
+	}
+}
+
+func claudeStopReasonToCompletionFinishReason(stopReason, matchedStop string) string {
+	if matchedStop != "" {
+		return "stop"
+	}
+	if stopReason == "max_tokens" {
+		return "length"
+	}
+	return "stop"
 }

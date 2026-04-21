@@ -34,7 +34,7 @@ func parseRunOptions(args []string) (runOptions, error) {
 	fs.StringVar(&opts.listenHost, "listen-host", "", "proxy listen host")
 	fs.StringVar(&opts.listenHost, "host", "", "proxy listen host")
 	fs.StringVar(&opts.displayHost, "display-host", "", "proxy display host")
-	fs.StringVar(&opts.protocol, "protocol", "", "upstream protocol: responses or chat_completions (default: responses)")
+	fs.StringVar(&opts.protocol, "protocol", "", "upstream protocol: responses, chat_completions, or messages (default: responses)")
 	if err := fs.Parse(args); err != nil {
 		return runOptions{}, err
 	}
@@ -175,7 +175,7 @@ func promptInteractiveOptions(stdin io.Reader, stdout io.Writer, opts runOptions
 		return runOptions{}, false, err
 	}
 
-	protocolChoice, err := promptWithDefault(reader, stdout, "Upstream protocol (responses/chat_completions)", opts.protocol)
+	protocolChoice, err := promptWithDefault(reader, stdout, "Upstream protocol (responses/chat_completions/messages)", opts.protocol)
 	if err != nil {
 		return runOptions{}, false, err
 	}
@@ -270,6 +270,8 @@ func normalizeProtocol(raw string) string {
 	switch normalized {
 	case "chat_completions", "chatcompletions", "chat":
 		return "chat_completions"
+	case "messages", "message":
+		return "messages"
 	case "responses", "response", "":
 		return "responses"
 	default:

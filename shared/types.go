@@ -11,6 +11,7 @@ const defaultResponsesURL = "https://api.openai.com/v1/responses"
 const (
 	upstreamProtocolResponses       = "responses"
 	upstreamProtocolChatCompletions = "chat_completions"
+	upstreamProtocolMessages        = "messages"
 )
 
 type Config struct {
@@ -18,6 +19,7 @@ type Config struct {
 	ModelsURL          string
 	ResponsesURL       string
 	ChatCompletionsURL string
+	MessagesURL        string
 	UpstreamProtocol   string
 	APIKey             string
 	Timeout            time.Duration

@@ -52,6 +52,8 @@ func normalizeUpstreamProtocol(raw string) string {
 		return upstreamProtocolResponses
 	case upstreamProtocolChatCompletions:
 		return upstreamProtocolChatCompletions
+	case upstreamProtocolMessages, "message":
+		return upstreamProtocolMessages
 	default:
 		return ""
 	}

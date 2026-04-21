@@ -461,6 +461,7 @@
               <select id="protocol">
                 <option value="responses">Responses</option>
                 <option value="chat_completions">Chat Completions</option>
+                <option value="messages">Messages (Claude)</option>
               </select>
             </div>
           </div>
@@ -823,6 +824,8 @@
     function updateHintText() {
       const protocolPath = protocolInput.value === "chat_completions"
         ? "/v1/chat/completions"
+        : protocolInput.value === "messages"
+        ? "/v1/messages"
         : "/v1/responses";
 
       if (hostModeInput.value === "custom") {

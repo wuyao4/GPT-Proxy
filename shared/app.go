@@ -101,6 +101,7 @@ type OpenAITarget struct {
 	ModelsURL          string
 	ResponsesURL       string
 	ChatCompletionsURL string
+	MessagesURL        string
 	UpstreamProtocol   string
 }
 
@@ -108,6 +109,8 @@ func (t OpenAITarget) UpstreamURL() string {
 	switch normalizeUpstreamProtocol(t.UpstreamProtocol) {
 	case upstreamProtocolChatCompletions:
 		return t.ChatCompletionsURL
+	case upstreamProtocolMessages:
+		return t.MessagesURL
 	default:
 		return t.ResponsesURL
 	}
@@ -331,6 +334,7 @@ func (a *App) StartProxy(ctx context.Context, host, key string, port int, hostMo
 		ModelsURL:          target.ModelsURL,
 		ResponsesURL:       target.ResponsesURL,
 		ChatCompletionsURL: target.ChatCompletionsURL,
+		MessagesURL:        target.MessagesURL,
 		UpstreamProtocol:   target.UpstreamProtocol,
 		APIKey:             strings.TrimSpace(key),
 		Timeout:            a.timeout,
@@ -528,6 +532,8 @@ func (a *App) CheckOpenAICompatibility(ctx context.Context, target OpenAITarget,
 	switch normalizeUpstreamProtocol(target.UpstreamProtocol) {
 	case upstreamProtocolChatCompletions:
 		return a.CheckChatCompletionsCompatibility(ctx, target.ChatCompletionsURL, key, model)
+	case upstreamProtocolMessages:
+		return a.CheckMessagesCompatibility(ctx, target.MessagesURL, key, model)
 	default:
 		return a.CheckResponsesCompatibility(ctx, target.ResponsesURL, key, model)
 	}
@@ -564,6 +570,17 @@ func (a *App) RunOpenAITest(ctx context.Context, target OpenAITarget, key, model
 			MaxTokens: 16,
 		})
 		return a.executeOpenAIStreamTestRequest(ctx, result, key, target.ChatCompletionsURL, payload)
+	case upstreamProtocolMessages:
+		payload := claudeMessagesRequest{
+			Model: model,
+			Messages: []claudeInputMessage{{
+				Role:    "user",
+				Content: mustMarshalJSON("ping"),
+			}},
+			MaxTokens: 16,
+			Stream:    true,
+		}
+		return a.executeMessagesStreamTestRequest(ctx, result, key, target.MessagesURL, payload)
 	default:
 		payload := openAIResponsesRequest{
 			Model: model,
@@ -773,7 +790,7 @@ func (a *App) handleLogs(w http.ResponseWriter, r *http.Request) {
 func ResolveOpenAITarget(raw, mode, protocol string) (OpenAITarget, error) {
 	upstreamProtocol := normalizeUpstreamProtocol(protocol)
 	if upstreamProtocol == "" {
-		return OpenAITarget{}, errors.New("protocol must be responses or chat_completions")
+		return OpenAITarget{}, errors.New("protocol must be responses, chat_completions, or messages")
 	}
 
 	switch strings.ToLower(strings.TrimSpace(mode)) {
@@ -787,6 +804,7 @@ func ResolveOpenAITarget(raw, mode, protocol string) (OpenAITarget, error) {
 			ModelsURL:          modelsURL,
 			ResponsesURL:       responsesURL,
 			ChatCompletionsURL: baseURL + "/v1/chat/completions",
+			MessagesURL:        baseURL + "/v1/messages",
 			UpstreamProtocol:   upstreamProtocol,
 		}, nil
 	case "custom":
@@ -798,9 +816,12 @@ func ResolveOpenAITarget(raw, mode, protocol string) (OpenAITarget, error) {
 			DisplayURL:       exactURL,
 			UpstreamProtocol: upstreamProtocol,
 		}
-		if upstreamProtocol == upstreamProtocolChatCompletions {
+		switch upstreamProtocol {
+		case upstreamProtocolChatCompletions:
 			target.ChatCompletionsURL = exactURL
-		} else {
+		case upstreamProtocolMessages:
+			target.MessagesURL = exactURL
+		default:
 			target.ResponsesURL = exactURL
 		}
 		return target, nil
@@ -902,4 +923,91 @@ func fallback(value, defaultValue string) string {
 		return strings.TrimSpace(value)
 	}
 	return defaultValue
+}
+
+func (a *App) CheckMessagesCompatibility(ctx context.Context, messagesURL, key, model string) error {
+	content, _ := json.Marshal("ping")
+	payload := claudeMessagesRequest{
+		Model: strings.TrimSpace(model),
+		Messages: []claudeInputMessage{{
+			Role:    "user",
+			Content: json.RawMessage(content),
+		}},
+		MaxTokens: 16,
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal messages preflight: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, messagesURL, strings.NewReader(string(body)))
+	if err != nil {
+		return fmt.Errorf("build messages preflight request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	if strings.TrimSpace(key) != "" {
+		req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(key))
+		req.Header.Set("x-api-key", strings.TrimSpace(key))
+	}
+	req.Header.Set("anthropic-version", "2023-06-01")
+
+	client := &http.Client{Timeout: a.timeout}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("messages request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		raw, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+		if readErr != nil {
+			return fmt.Errorf("messages status %d and failed to read body: %w", resp.StatusCode, readErr)
+		}
+		return fmt.Errorf("messages status %d for model %s: %s", resp.StatusCode, model, strings.TrimSpace(string(raw)))
+	}
+	return nil
+}
+
+func mustMarshalJSON(v any) json.RawMessage {
+	b, _ := json.Marshal(v)
+	return json.RawMessage(b)
+}
+
+func (a *App) executeMessagesStreamTestRequest(ctx context.Context, result OpenAITestResult, key, targetURL string, payload claudeMessagesRequest) (OpenAITestResult, error) {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return OpenAITestResult{}, fmt.Errorf("marshal test request: %w", err)
+	}
+	result.RequestPayload = json.RawMessage(body)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, strings.NewReader(string(body)))
+	if err != nil {
+		return OpenAITestResult{}, fmt.Errorf("build test request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
+	req.Header.Set("anthropic-version", "2023-06-01")
+	if k := strings.TrimSpace(key); k != "" {
+		req.Header.Set("Authorization", "Bearer "+k)
+		req.Header.Set("x-api-key", k)
+	}
+
+	client := &http.Client{Timeout: a.timeout}
+	resp, err := client.Do(req)
+	if err != nil {
+		return OpenAITestResult{}, fmt.Errorf("conversation request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return OpenAITestResult{}, fmt.Errorf("read test response body: %w", err)
+	}
+
+	result.StatusCode = resp.StatusCode
+	result.OK = resp.StatusCode >= 200 && resp.StatusCode < 300
+	result.ResponseBody = strings.TrimSpace(string(raw))
+	return result, nil
 }

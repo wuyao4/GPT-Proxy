@@ -764,3 +764,312 @@ func writeChatCompletionChunk(w io.Writer, flusher http.Flusher, payload openAIC
 	}
 	return writeSSEDataRaw(w, flusher, string(data))
 }
+
+// streamOpenAIResponsesViaMessages streams a Responses request via upstream Claude Messages SSE.
+func (s *Server) streamOpenAIResponsesViaMessages(w http.ResponseWriter, incoming *http.Request, payload claudeMessagesRequest) error {
+	payload.Stream = true
+	upstream, statusCode, err := s.forwardMessagesStream(incoming, payload)
+	if err != nil {
+		writeError(w, statusCode, err.Error())
+		return nil
+	}
+	defer upstream.Body.Close()
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "streaming is not supported by the server")
+		return nil
+	}
+
+	initSSEHeaders(w)
+	state := streamState{Model: payload.Model}
+	created := false
+	completed := false
+	var textBuilder strings.Builder
+
+	emitCreated := func() error {
+		if created {
+			return nil
+		}
+		created = true
+		return writeSSEEvent(w, flusher, "response.created", map[string]any{
+			"type":       "response.created",
+			"id":         state.ID,
+			"object":     "response",
+			"created_at": createdAtOrNow(state.CreatedAt),
+			"model":      coalesce(state.Model, payload.Model),
+			"status":     "in_progress",
+			"output":     []openAIResponseOutput{},
+		})
+	}
+
+	var finalUsage *claudeMessageUsage
+	var finalStopReason string
+
+	err = consumeSSE(upstream.Body, func(evt sseEvent) error {
+		if evt.Data == "" {
+			return nil
+		}
+
+		eventType := evt.Event
+		if eventType == "" {
+			var envelope struct {
+				Type string `json:"type"`
+			}
+			if jsonErr := json.Unmarshal([]byte(evt.Data), &envelope); jsonErr == nil {
+				eventType = envelope.Type
+			}
+		}
+
+		switch eventType {
+		case "message_start":
+			var e claudeMessageStartEvent
+			if err := json.Unmarshal([]byte(evt.Data), &e); err != nil {
+				return err
+			}
+			state.ID = coalesce(e.Message.ID, state.ID)
+			state.Model = coalesce(e.Message.Model, state.Model, payload.Model)
+			state.CreatedAt = createdAtOrNow(0)
+			return emitCreated()
+		case "content_block_delta":
+			var e claudeContentBlockDeltaEvent
+			if err := json.Unmarshal([]byte(evt.Data), &e); err != nil {
+				return err
+			}
+			if e.Delta.Type == "text_delta" && e.Delta.Text != "" {
+				if err := emitCreated(); err != nil {
+					return err
+				}
+				textBuilder.WriteString(e.Delta.Text)
+				return writeSSEEvent(w, flusher, "response.output_text.delta", openAIResponsesTextDeltaEvent{
+					Type:  "response.output_text.delta",
+					Delta: e.Delta.Text,
+				})
+			}
+		case "message_delta":
+			var e claudeMessageDeltaEvent
+			if err := json.Unmarshal([]byte(evt.Data), &e); err != nil {
+				return err
+			}
+			finalStopReason = e.Delta.StopReason
+			if e.Usage != nil {
+				finalUsage = e.Usage
+			}
+		case "message_stop":
+			if err := emitCreated(); err != nil {
+				return err
+			}
+			text := textBuilder.String()
+			output := []openAIResponseOutput{}
+			if text != "" {
+				output = []openAIResponseOutput{{
+					Type: "message",
+					Role: "assistant",
+					Content: []openAIResponseContent{{
+						Type: "output_text",
+						Text: text,
+					}},
+				}}
+			}
+			status := "completed"
+			var incomplete *openAIIncompleteDetail
+			if finalStopReason == "max_tokens" {
+				status = "incomplete"
+				incomplete = &openAIIncompleteDetail{Reason: "max_output_tokens"}
+			}
+			completedPayload := map[string]any{
+				"type":       "response.completed",
+				"id":         state.ID,
+				"object":     "response",
+				"created_at": createdAtOrNow(state.CreatedAt),
+				"model":      coalesce(state.Model, payload.Model),
+				"status":     status,
+				"output":     output,
+			}
+			if incomplete != nil {
+				completedPayload["incomplete_details"] = incomplete
+			}
+			if u := claudeUsageToResponsesUsage(finalUsage); u != nil {
+				completedPayload["usage"] = u
+			}
+			if err := writeSSEEvent(w, flusher, "response.completed", completedPayload); err != nil {
+				return err
+			}
+			_ = writeSSEDataRaw(w, flusher, "[DONE]")
+			completed = true
+		case "error":
+			return writeSSEEvent(w, flusher, "error", map[string]string{
+				"type":    "error",
+				"message": evt.Data,
+			})
+		}
+		return nil
+	})
+
+	if err != nil && !completed {
+		_ = writeSSEEvent(w, flusher, "error", map[string]string{
+			"type":    "error",
+			"message": err.Error(),
+		})
+		_ = writeSSEDataRaw(w, flusher, "[DONE]")
+	}
+	return err
+}
+
+// streamOpenAIChatCompletionsViaMessages streams a Chat Completions request via upstream Claude Messages SSE.
+func (s *Server) streamOpenAIChatCompletionsViaMessages(w http.ResponseWriter, incoming *http.Request, payload claudeMessagesRequest, fallbackModel string, stopSequences []string) error {
+	payload.Stream = true
+	upstream, statusCode, err := s.forwardMessagesStream(incoming, payload)
+	if err != nil {
+		writeError(w, statusCode, err.Error())
+		return nil
+	}
+	defer upstream.Body.Close()
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "streaming is not supported by the server")
+		return nil
+	}
+
+	initSSEHeaders(w)
+	filter := newStopSequenceFilter(stopSequences)
+	state := streamState{Model: fallbackModel}
+	roleChunkSent := false
+	completed := false
+	var finalUsage *claudeMessageUsage
+	var finalStopReason string
+
+	err = consumeSSE(upstream.Body, func(evt sseEvent) error {
+		if evt.Data == "" {
+			return nil
+		}
+
+		eventType := evt.Event
+		if eventType == "" {
+			var envelope struct {
+				Type string `json:"type"`
+			}
+			if jsonErr := json.Unmarshal([]byte(evt.Data), &envelope); jsonErr == nil {
+				eventType = envelope.Type
+			}
+		}
+
+		switch eventType {
+		case "message_start":
+			var e claudeMessageStartEvent
+			if err := json.Unmarshal([]byte(evt.Data), &e); err != nil {
+				return err
+			}
+			state.ID = coalesce(e.Message.ID, state.ID)
+			state.Model = coalesce(e.Message.Model, state.Model, fallbackModel)
+			state.CreatedAt = createdAtOrNow(0)
+			if !roleChunkSent {
+				if err := writeChatCompletionChunk(w, flusher, openAIChatCompletionChunkResponse{
+					ID:      state.ID,
+					Object:  "chat.completion.chunk",
+					Created: createdAtOrNow(state.CreatedAt),
+					Model:   coalesce(state.Model, fallbackModel),
+					Choices: []openAIChatCompletionChunkChoice{{
+						Index: 0,
+						Delta: openAIChatDelta{Role: "assistant"},
+					}},
+				}); err != nil {
+					return err
+				}
+				roleChunkSent = true
+			}
+		case "content_block_delta":
+			var e claudeContentBlockDeltaEvent
+			if err := json.Unmarshal([]byte(evt.Data), &e); err != nil {
+				return err
+			}
+			if e.Delta.Type == "text_delta" && e.Delta.Text != "" {
+				if !roleChunkSent {
+					if err := writeChatCompletionChunk(w, flusher, openAIChatCompletionChunkResponse{
+						ID:      state.ID,
+						Object:  "chat.completion.chunk",
+						Created: createdAtOrNow(state.CreatedAt),
+						Model:   coalesce(state.Model, fallbackModel),
+						Choices: []openAIChatCompletionChunkChoice{{
+							Index: 0,
+							Delta: openAIChatDelta{Role: "assistant"},
+						}},
+					}); err != nil {
+						return err
+					}
+					roleChunkSent = true
+				}
+				emitted, _, _ := filter.Push(e.Delta.Text)
+				if emitted != "" {
+					if err := writeChatCompletionChunk(w, flusher, openAIChatCompletionChunkResponse{
+						ID:      state.ID,
+						Object:  "chat.completion.chunk",
+						Created: createdAtOrNow(state.CreatedAt),
+						Model:   coalesce(state.Model, fallbackModel),
+						Choices: []openAIChatCompletionChunkChoice{{
+							Index: 0,
+							Delta: openAIChatDelta{Content: emitted},
+						}},
+					}); err != nil {
+						return err
+					}
+				}
+			}
+		case "message_delta":
+			var e claudeMessageDeltaEvent
+			if err := json.Unmarshal([]byte(evt.Data), &e); err != nil {
+				return err
+			}
+			finalStopReason = e.Delta.StopReason
+			if e.Usage != nil {
+				finalUsage = e.Usage
+			}
+		case "message_stop":
+			finalText := filter.Flush()
+			if finalText != "" {
+				if err := writeChatCompletionChunk(w, flusher, openAIChatCompletionChunkResponse{
+					ID:      state.ID,
+					Object:  "chat.completion.chunk",
+					Created: createdAtOrNow(state.CreatedAt),
+					Model:   coalesce(state.Model, fallbackModel),
+					Choices: []openAIChatCompletionChunkChoice{{
+						Index: 0,
+						Delta: openAIChatDelta{Content: finalText},
+					}},
+				}); err != nil {
+					return err
+				}
+			}
+			finishReason := claudeStopReasonToCompletionFinishReason(finalStopReason, filter.Matched())
+			var usage *openAIChatUsage
+			if finalUsage != nil {
+				usage = claudeUsageToChatUsage(finalUsage)
+			}
+			if err := writeChatCompletionChunk(w, flusher, openAIChatCompletionChunkResponse{
+				ID:      state.ID,
+				Object:  "chat.completion.chunk",
+				Created: createdAtOrNow(state.CreatedAt),
+				Model:   coalesce(state.Model, fallbackModel),
+				Choices: []openAIChatCompletionChunkChoice{{
+					Index:        0,
+					Delta:        openAIChatDelta{},
+					FinishReason: finishReason,
+				}},
+				Usage: usage,
+			}); err != nil {
+				return err
+			}
+			_ = writeSSEDataRaw(w, flusher, "[DONE]")
+			completed = true
+		case "error":
+			return writeSSEDataRaw(w, flusher, "[DONE]")
+		}
+		return nil
+	})
+
+	if err != nil && !completed {
+		_ = writeSSEDataRaw(w, flusher, "[DONE]")
+	}
+	return err
+}
